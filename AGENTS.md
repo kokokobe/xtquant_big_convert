@@ -268,6 +268,12 @@ TIMEOUT=数据服务依赖（#143 挂 60-90s，慎调）；**空参 TypeError �
   无碍。**下载必须走异步任务队列**：`download_jobs_enabled: True` +
   `submit_download_history_data`（秒回 job_id）→ `get_download_status` 轮询 →
   `get_market_data_ex` 验证落地；内联 download RPC 在 drain 模式下视为禁用
+- **✅ 进程间发布总线（pub_bus.py）已实测双向打通（09-16）**：QMT→外部经
+  `bus_publish` RPC（2/2 收到）；外部→QMT 外部 BusPublisher 直发 +
+  `bus_inbox_drain` 取（2/2）。发布微秒级；RPC 外壳往返 ~50-95ms（drain 100ms
+  tick 所致，总线推送本身亚毫秒）。多订阅者=独立事件+独立游标；环覆盖有
+  `__bus_lost__` 通告。工具：tools/test_bus_e2e.py。外部→QMT 的消息若触发
+  下单，必须转 pending 队列在 adjust tick 执行（#252）
 - **REACHABLE ≠ 不可用**：空参 TypeError 只说明分发通。带真实参数实测
   `download_history_data`（513300.SH 1d 两周）→ ok=True 且 get_market_data_ex
   读回 11 个交易日 OHLC——下载族走 ContextInfo 通道可用（tools/
