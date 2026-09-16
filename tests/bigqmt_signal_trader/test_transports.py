@@ -173,9 +173,17 @@ class FactoryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_transport("nonsense", {}, account_id="x")
 
-    def test_shm_raises_on_use(self):
+    def test_shm_without_a_server_times_out(self):
+        """shm 2026-09-15 起是真实现（mmap 环形缓冲 + 内核事件）。
+
+        占位期这条断言的是"用了就抛 not implemented"；现在没有服务端时
+        走标准超时语义 —— 详见 test_shm_transport.py。
+        """
+        from bigqmt_signal_trader.transports.base import TransportTimeout
+
         shm = build_transport("shm", {}, account_id="x")
-        with self.assertRaises(TransportError):
+        self.addCleanup(shm.stop)
+        with self.assertRaises(TransportTimeout):
             shm.send_request(_build_request(), 1.0)
 
     def test_redis_factory_with_injected_clients(self):

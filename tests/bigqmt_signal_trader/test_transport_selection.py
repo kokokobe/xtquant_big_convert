@@ -41,12 +41,11 @@ class BackgroundThreadResolutionTest(unittest.TestCase):
         self.assertFalse(_resolve_background_threads("mysql", False))
         self.assertTrue(_resolve_background_threads("mysql", True))
 
-    def test_drainless_transports_ignore_the_override(self):
-        # shm has no drain_request_queue: without the receiver thread requests
-        # would never be picked up, so even an explicit False cannot turn it
-        # off here.
+    def test_shm_drain_override_now_stands(self):
+        # shm 有了真正的 drain_request_queue（2026-09-15，mmap 环形缓冲 +
+        # 内核事件），从"必须保留接收线程"名单毕业 —— 显式 False 生效。
         self.assertTrue(_resolve_background_threads("shm", None))
-        self.assertTrue(_resolve_background_threads("shm", False))
+        self.assertFalse(_resolve_background_threads("shm", False))
         self.assertTrue(_resolve_background_threads("shm", True))
 
     def test_is_redis_transport(self):

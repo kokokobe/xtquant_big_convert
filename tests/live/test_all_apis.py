@@ -23,7 +23,7 @@ import sys
 import time
 
 # Add src to path so bigqmt_signal_trader resolves when run from repo root.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 
 from bigqmt_signal_trader.redis_rpc import call_redis_rpc
 

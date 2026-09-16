@@ -16,7 +16,7 @@ import sys
 import unittest
 
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # tests/infra/ -> 工程根
 SRC = os.path.join(ROOT, "src")
 
 
@@ -24,7 +24,7 @@ def _run(code):
     """Execute in a fresh interpreter: import order is the whole point here."""
     return subprocess.run(
         [sys.executable, "-c", code],
-        capture_output=True, text=True, cwd=ROOT,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, cwd=ROOT,
         env=dict(os.environ, PYTHONPATH=SRC),
     )
 

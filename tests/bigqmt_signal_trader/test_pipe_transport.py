@@ -212,15 +212,19 @@ class BackgroundThreadResolutionTest(unittest.TestCase):
         self.assertTrue(_resolve_background_threads("pipe", True))
 
     def test_a_transport_without_a_real_drain_keeps_its_thread(self):
-        """没实现 drain 的传输必须保留接收线程，否则一条请求都收不到。"""
+        """没实现 drain 的传输必须保留接收线程，否则一条请求都收不到。
+
+        shm 传输 2026-09-15 实现了真正的 drain（mmap 环形缓冲 + 内核事件），
+        从这份名单里"毕业"了 —— 见 test_shm_transport.py。
+        """
         from bigqmt_signal_trader_strategy import _resolve_background_threads
-        self.assertTrue(_resolve_background_threads("shm", False))
+        self.assertFalse(_resolve_background_threads("shm", False))
+        self.assertTrue(_resolve_background_threads("nonesuch", False))
 
     def test_the_decision_asks_the_transport_not_a_list(self):
         from bigqmt_signal_trader_strategy import _transport_can_drain
-        for name in ("zmq", "mysql", "pipe"):
+        for name in ("zmq", "mysql", "pipe", "shm"):
             self.assertTrue(_transport_can_drain(name), name)
-        self.assertFalse(_transport_can_drain("shm"))
         self.assertFalse(_transport_can_drain("nonesuch"))
 
     def test_unset_keeps_the_historical_default(self):

@@ -24,15 +24,18 @@ SRC = os.path.join(ROOT, "src")
 GROUPS = [
     ("signal_trader", [os.path.join("tests", "bigqmt_signal_trader")], False),
     ("backtest", [os.path.join("tests", "bigqmt_backtest")], False),
+    ("infra", [os.path.join("tests", "infra")], False),
 ]
-LIVE_GROUP = ("live_api", ["test_all_apis.py"], True)
+LIVE_GROUP = ("live_api", [os.path.join("tests", "live")], True)
 
 
 def run_group(name, paths, verbose):
     """Run a pytest group, return (passed, failed, skipped, seconds)."""
     cmd = [sys.executable, "-m", "pytest"] + paths + ["-q" if not verbose else "-v"]
     t0 = time.time()
-    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    # py3.6 兼容: capture_output/text 都是 3.7+ 参数, 用 PIPE/universal_newlines
+    proc = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, universal_newlines=True)
     elapsed = time.time() - t0
     out = (proc.stdout or "") + (proc.stderr or "")
     # Parse pytest summary like "290 passed in 8.5s" / "1 failed, 289 passed, 3 skipped"

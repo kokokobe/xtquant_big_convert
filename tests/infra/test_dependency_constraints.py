@@ -24,7 +24,7 @@ import re
 import unittest
 
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # tests/infra/ -> 工程根
 PYPROJECT = os.path.join(ROOT, "pyproject.toml")
 README = os.path.join(ROOT, "README.md")
 

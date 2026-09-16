@@ -367,6 +367,14 @@ def build_quote_subscription_service(
         bind_address = zmq_bind_address or _default_quote_push_zmq_bind(account_id)
         channel = ZmqQuotePushChannel(bind_address=bind_address)
         push_endpoint = bind_address
+    elif transport_name == "shm":
+        # 2026-09-15: shm (零 TCP，QMT 审计合规) 传输只有 RPC 线，行情推送是
+        # 另一条 wire。落到 RedisQuotePushChannel(redis_client=None) 的话，
+        # no-redis 部署会拿到一个 None 客户端 —— 订阅时才炸，还容易被当成
+        # "推送坏了" 而不是 "shm 没有推送通道"。这里显式声明不支持，让服务
+        # 整体退化为 None（start_publisher / reap_expired 都有 None 守卫）。
+        print("[quote_push] disabled: transport=shm has no push channel yet")
+        return None
     else:
         channel = RedisQuotePushChannel(redis_client, account_id=account_id)
         push_endpoint = ""
