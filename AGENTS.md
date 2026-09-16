@@ -261,8 +261,15 @@ TIMEOUT=数据服务依赖（#143 挂 60-90s，慎调）；**空参 TypeError �
   download_his_st_data；TIMEOUT 名单见 tools/market_data_sweep_report.txt。
   **下单链路**：submit_order 60 并发全受理进模拟柜台，60/60 唯一 id，资金/持仓
   零变化；并发下单注意 #304（0.3.44 drain 每拍限时 + 过期拒绝）
+- **⚠️ rpc_background_threads=True 在本终端不可用（2026-09-16 实测回退）**：
+  切后台线程模式后 ping 110ms（listener 未即时处理）、get_asset 返回 cash=1000.0
+  （真实 63464.87——**数据正确性错误**，比慢更严重）、submit 3.1s、query_orders
+  30s 超时级联劣化。**保持 False（drain 模式）**：三天稳定、数据正确。代价是
+  RPC 往返 ~50-95ms（adjust 100ms tick），对信号推送（总线亚毫秒）无影响。
+   交易上下文方法本就由 LISTENER_DEFERRED_METHODS 强制走 adjust，切换无收益。
+   另注意：sim 柜台实测中出现过 cash=1000.0 异常，排查时先核对终端委托/成交记录
 - **⚠️ 同步下载在 drain 线程上 = 死锁（2026-09-16 14:46 实测）**：内联调用
-  `download_history_data`/`down_history_data` 下载**本地没有的新数据**时，
+   `download_history_data`/`down_history_data` 下载**本地没有的新数据**时，
   adjust 线程永久冻结（ping 冻结、cadence 停摆，QMT 下载完成回调落在被阻塞的
   同一线程——#202 同款机制），只能重启桥解卡。本地已有数据的增量下载秒回
   无碍。**下载必须走异步任务队列**：`download_jobs_enabled: True` +
