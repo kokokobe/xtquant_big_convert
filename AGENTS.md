@@ -261,6 +261,13 @@ TIMEOUT=数据服务依赖（#143 挂 60-90s，慎调）；**空参 TypeError �
   download_his_st_data；TIMEOUT 名单见 tools/market_data_sweep_report.txt。
   **下单链路**：submit_order 60 并发全受理进模拟柜台，60/60 唯一 id，资金/持仓
   零变化；并发下单注意 #304（0.3.44 drain 每拍限时 + 过期拒绝）
+- **✅ 调优实测（schedule_adjust_interval 100ms→10ms + drain_max_items 50，10-16）**：
+  ping avg **1.85-8.91ms**（调优前 50-110ms，**27-60 倍改善**）；get_positions/
+  get_market_data_ex 稳定 15-16ms；查询吞吐上限 100ms×20/拍 → 10ms×50/拍。
+  **间歇挂起（get_asset/query_orders 挂 15-100s 后自愈）= 共享账户交易数据
+  争抢**：其他终端自动交易波次内（cash 63464→1000 的大额买入时段），同账号
+  的 get_trade_detail_data 类查询被阻塞——环境因素非桥缺陷，错峰使用或接受
+  间歇慢查询
 - **⚠️ rpc_background_threads=True 实测终审（2026-09-16 回退定案）**：功能可用
   （deferred 闸门工作、下单/查询都能通），**但无延迟收益**——真实桥里所有请求
   仍走 ~100ms adjust 节奏（listener 线程的事件唤醒未兑现亚毫秒，机制在 QMT
