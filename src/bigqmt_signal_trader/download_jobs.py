@@ -16,8 +16,58 @@ job data the pump reads back:
 """
 
 import json
+import threading
 import time
 import uuid
+
+
+# ---------------------------------------------------------------------------
+# 内存任务注册表（redis_client=None 的回退，2026-09-16）。
+# shm/pipe 等无 redis 部署里，提交（RPC）与执行（后台线程）都在桥进程内，
+# 不需要 redis 的跨进程可见性——用进程内注册表 + 后台守护线程逐只下载。
+# 关键设计：下载挂起（#143 原生连接罚金 / 完成回调线程亲和）只挂 worker
+# 守护线程，桥的 drain/adjust 线程永不受影响（内联同步下载会死锁，实测）。
+# ---------------------------------------------------------------------------
+_MEM_JOBS = {}
+_MEM_LOCK = threading.Lock()
+
+
+def _mem_write(job):
+    with _MEM_LOCK:
+        _MEM_JOBS[job["job_id"]] = dict(job)
+
+
+def _mem_read(job_id):
+    with _MEM_LOCK:
+        job = _MEM_JOBS.get(str(job_id or ""))
+        return dict(job) if job else None
+
+
+def _mem_update(job_id, **fields):
+    with _MEM_LOCK:
+        job = _MEM_JOBS.get(str(job_id or ""))
+        if job is None:
+            return
+        job.update(fields)
+        job["updated_at_ts"] = time.time()
+
+
+def _mem_worker(job, download_func):
+    """后台守护线程：逐只调用 download_func(code, period, start, end) 并更新进度。"""
+    job_id = job["job_id"]
+    _mem_update(job_id, state=RUNNING)
+    codes = job.get("stock_list") or []
+    done = 0
+    try:
+        for code in codes:
+            download_func(code, job.get("period"), job.get("start_time") or "",
+                          job.get("end_time") or "")
+            done += 1
+            _mem_update(job_id, done=done, state=RUNNING)
+        _mem_update(job_id, state=DONE, done=done)
+    except Exception as exc:
+        _mem_update(job_id, state=FAILED, done=done,
+                    error="%s: %s" % (exc.__class__.__name__, exc))
 
 
 # Dedicated "bigqmt:dljob:*" namespace for the client<->pump protocol.
@@ -95,8 +145,14 @@ def submit_download_job(
     incrementally=None,
     chunk_size=DEFAULT_CHUNK_SIZE,
     job_ttl_seconds=DEFAULT_JOB_TTL_SECONDS,
+    download_func=None,
 ):
-    """Queue a download job and return its initial status dict (non-blocking)."""
+    """Queue a download job and return its initial status dict (non-blocking).
+
+    redis_client=None 走内存模式：任务存进程内注册表，由后台守护线程逐只执行
+    （download_func(code, period, start_time, end_time)）。下载挂起只挂 worker
+    线程——这正是它相对"adjust 线程内联下载（死锁，2026-09-16 实测）"的意义。
+    """
     codes = [str(code) for code in (stock_list or []) if str(code or "").strip()]
     if not codes:
         raise ValueError("stock_list is required for a download job")
@@ -118,6 +174,17 @@ def submit_download_job(
         "created_at_ts": now,
         "updated_at_ts": now,
     }
+    if redis_client is None:
+        if download_func is None:
+            raise ValueError(
+                "memory-mode download jobs need a download_func "
+                "(the per-code download callable)")
+        _mem_write(job)
+        worker = threading.Thread(
+            target=_mem_worker, args=(dict(job), download_func),
+            name="bigqmt-dljob-%s" % job_id, daemon=True)
+        worker.start()
+        return job
     ttl = int(max(1, job_ttl_seconds))
     redis_client.setex(job_key(account_id, job_id), ttl, _enc(json.dumps(job, ensure_ascii=False)))
     redis_client.rpush(queue_key(account_id), _enc(job_id))
@@ -130,6 +197,8 @@ def submit_download_job(
 
 def read_download_status(redis_client, account_id, job_id):
     """Return the current job status dict, or None if unknown/expired."""
+    if redis_client is None:
+        return _mem_read(job_id)
     decoded = _dec(redis_client.get(job_key(account_id, job_id)))
     if not decoded:
         return None
@@ -205,7 +274,12 @@ def pump_download_jobs(
     Downloads at least one chunk (so progress is always made) and keeps going
     until the wall-clock budget is spent. Returns a small status summary, or None
     when there is no active job. Runs on the caller (strategy) thread.
+
+    redis_client=None（内存模式）时返回 None：任务由提交时派生的后台守护线程
+    自驱动，不需要 tick 泵。
     """
+    if redis_client is None:
+        return None
     job = _acquire_current_job(redis_client, account_id)
     if job is None:
         return None

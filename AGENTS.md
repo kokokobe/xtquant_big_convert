@@ -201,6 +201,13 @@ signaler 回环自连；`Context.instance()` 不随策略停止回收，留僵�
   download_his_st_data；TIMEOUT 名单见 tools/market_data_sweep_report.txt。
   **下单链路**：submit_order 60 并发全受理进模拟柜台，60/60 唯一 id，资金/持仓
   零变化；并发下单注意 #304（0.3.44 drain 每拍限时 + 过期拒绝）
+- **⚠️ 同步下载在 drain 线程上 = 死锁（2026-09-16 14:46 实测）**：内联调用
+  `download_history_data`/`down_history_data` 下载**本地没有的新数据**时，
+  adjust 线程永久冻结（ping 冻结、cadence 停摆，QMT 下载完成回调落在被阻塞的
+  同一线程——#202 同款机制），只能重启桥解卡。本地已有数据的增量下载秒回
+  无碍。**下载必须走异步任务队列**：`download_jobs_enabled: True` +
+  `submit_download_history_data`（秒回 job_id）→ `get_download_status` 轮询 →
+  `get_market_data_ex` 验证落地；内联 download RPC 在 drain 模式下视为禁用
 - **REACHABLE ≠ 不可用**：空参 TypeError 只说明分发通。带真实参数实测
   `download_history_data`（513300.SH 1d 两周）→ ok=True 且 get_market_data_ex
   读回 11 个交易日 OHLC——下载族走 ContextInfo 通道可用（tools/

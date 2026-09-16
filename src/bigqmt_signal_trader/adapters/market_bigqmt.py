@@ -1900,6 +1900,61 @@ class BigQmtMarketDataProvider:
         except Exception:
             return None
 
+    # ------------------------------------------------------------------
+    # ContextInfo 独有方法补全（2026-09-16 穷举探针
+    # src/sector_capability_probe.py 实锤这些方法在本终端 ContextInfo 上
+    # 存在而桥未暴露）。全部走 ContextInfo 通道（原生 xtdata 在 Big QMT 内
+    # 连不上行情服务，#143）。签名按迅投官方文档 + 带参实测校准。
+    # ------------------------------------------------------------------
+
+    def get_finance(self, stock_code):
+        """ContextInfo.get_finance(stock_code): 最新一期财务数据。"""
+        return self._call_context("get_finance", stock_code)
+
+    def get_universe(self):
+        """ContextInfo.get_universe(): 本策略当前订阅的合约列表。"""
+        return self._call_context("get_universe")
+
+    def get_scale_and_rank(self, index_name, sort_type=1):
+        """ContextInfo.get_scale_and_rank(index_name, sort_type): 板块内市值排名。"""
+        return self._call_context("get_scale_and_rank", index_name, sort_type)
+
+    def get_scale_and_stock(self, index_name):
+        """ContextInfo.get_scale_and_stock(index_name): 板块内按市值分类。"""
+        return self._call_context("get_scale_and_stock", index_name)
+
+    def get_largecap(self, stock_list):
+        """ContextInfo.get_largecap(stock_list): 大盘股筛选。"""
+        return self._call_context("get_largecap", stock_list)
+
+    def get_midcap(self, stock_list):
+        """ContextInfo.get_midcap(stock_list): 中盘股筛选。"""
+        return self._call_context("get_midcap", stock_list)
+
+    def get_smallcap(self, stock_list):
+        """ContextInfo.get_smallcap(stock_list): 小盘股筛选。"""
+        return self._call_context("get_smallcap", stock_list)
+
+    def is_suspended_stock(self, stock_code):
+        """ContextInfo.is_suspended_stock(stock_code): 是否停牌。"""
+        return self._call_context("is_suspended_stock", stock_code)
+
+    def stockcode_in_rzrk(self, stock_code):
+        """ContextInfo.stockcode_in_rzrk(stock_code): 是否在融资融券名单。"""
+        return self._call_context("stockcode_in_rzrk", stock_code)
+
+    def is_fund(self, stock_code):
+        """ContextInfo.is_fund(stock_code): 是否 ETF/基金。"""
+        return self._call_context("is_fund", stock_code)
+
+    def is_stock(self, stock_code):
+        """ContextInfo.is_stock(stock_code): 是否股票。"""
+        return self._call_context("is_stock", stock_code)
+
+    def is_future(self, stock_code):
+        """ContextInfo.is_future(stock_code): 是否期货。"""
+        return self._call_context("is_future", stock_code)
+
     def call_formula(self, formula_name, stock_code, period, start_time="", end_time="", count=-1, dividend_type=None, extend_param=None):
         return self._call_context(
             "call_formula",

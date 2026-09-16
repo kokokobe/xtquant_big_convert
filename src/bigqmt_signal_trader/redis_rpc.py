@@ -374,6 +374,19 @@ MARKET_DATA_METHODS = {
     # 时间戳转换（纯计算，服务端本地）
     "datetime_to_timetag",
     "timetag_to_datetime",
+    # ContextInfo 独有方法补全（2026-09-16 穷举探针实锤终端存在而桥未暴露）
+    "get_finance",
+    "get_universe",
+    "get_scale_and_rank",
+    "get_scale_and_stock",
+    "get_largecap",
+    "get_midcap",
+    "get_smallcap",
+    "is_suspended_stock",
+    "stockcode_in_rzrk",
+    "is_fund",
+    "is_stock",
+    "is_future",
 }
 
 # Keep READ_METHODS in sync with MARKET_DATA_METHODS: every market-data method
@@ -1511,10 +1524,10 @@ class BigQmtRpcHandlers:
                 or getattr(self, "download_job_redis_client", None))
 
     def _download_job_redis(self):
-        redis_client = getattr(self, "download_job_redis_client", None)
-        if redis_client is None:
-            raise RuntimeError("download jobs require a Redis client")
-        return redis_client
+        # 无 redis 时返回 None：download_jobs 走内存注册表 + 后台 worker 线程
+        # （提交与执行同进程，不需要跨进程可见性；内联同步下载在 drain 线程上
+        # 会死锁，2026-09-16 实测——所以 worker 必须是后台线程）。
+        return getattr(self, "download_job_redis_client", None)
 
     def _require_download_worker(self):
         """Refuse to queue work nothing is going to pick up.
@@ -1557,6 +1570,7 @@ class BigQmtRpcHandlers:
             incrementally=params.get("incrementally"),
             chunk_size=int(params.get("chunk_size") or getattr(self, "download_job_chunk_size", 10)),
             job_ttl_seconds=int(params.get("job_ttl_seconds") or getattr(self, "download_job_ttl_seconds", 3600)),
+            download_func=getattr(self.market_data, "download_history_data", None),
         )
 
     def _handle_submit_download_history_data(self, params):
