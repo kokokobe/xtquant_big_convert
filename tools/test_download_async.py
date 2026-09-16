@@ -38,7 +38,7 @@ def call(method, params, timeout):
 try:
     # 1) 提交异步下载任务（应秒回 job_id）
     t0 = time.time()
-    sub = call("submit_download_history_data", {
+    sub = call("submit_download_history_data2", {
         "stock_list": [STOCK], "period": PERIOD,
         "start_time": START, "end_time": END,
     }, 30.0)
@@ -50,17 +50,15 @@ try:
     d = sub.get("data") or {}
     job_id = d.get("job_id") or d.get("jobId") or d.get("id")
 
-    # 2) 轮询任务状态
+    # 2) 轮询任务状态（任务字典的字段是 state: pending/running/done/failed）
     status = None
     for i in range(60):
         time.sleep(3.0)
         st = call("get_download_status", {"job_id": job_id}, 20.0)
         sd = st.get("data") or {}
-        status = sd.get("status")
-        print("  poll %02d: status=%s %s" % (
-            i + 1, status,
-            json.dumps({k: v for k, v in sd.items() if k != "status"},
-                       ensure_ascii=False, default=str)[:150].encode("gbk", "replace").decode("gbk")))
+        status = sd.get("state")
+        print("  poll %02d: state=%s done=%s/%s" % (
+            i + 1, status, sd.get("done"), sd.get("total")))
         if str(status).lower() in ("done", "completed", "finished", "ok", "true", "success"):
             break
         if str(status).lower() in ("failed", "error"):
