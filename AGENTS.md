@@ -211,3 +211,14 @@ signaler 回环自连；`Context.instance()` 不随策略停止回收，留僵�
   5222 成分 ✓（#130 教训：适配器默认拒绝返回假列表，逃逸参数是显式设计的）。
   用户引用的迅投通用文档里 get_sector_list 是系统函数，但本终端 ContextInfo
   只有 create_sector/get_sector/get_stock_list_in_sector 三个板块方法（probe 实锤）
+- **穷举探针（src/sector_capability_probe.py，QMT 编辑器跑）一锤定音**：本终端
+  ContextInfo 共 142 属性，板块相关只有 create_sector/get_sector/
+  get_stock_list_in_sector；get_sector_list=False、板块写 6 函数=False、
+  download_history_data=False、call_formula 族=False（与 BIZ 判决完全一致）；
+  原生 xtdata（D:\python-lib-gf\...\xtquant\xtdata.py）有 get_sector_list/
+  add_sector/remove_sector/download_sector_data 但连不上行情服务（#143）。
+  **官方文档是迅投通用规格，广发内嵌 ContextInfo 是阉割版——判定函数有无以
+  穷举探针为准，勿引文档**。附带发现：ContextInfo 有 get_universe/set_universe
+  属性（与"广发不支持 set_universe"的旧记录有出入，属性存在≠生效）、get_finance、
+  load_stk_list、get_scale_and_rank、get_largecap/midcap/smallcap、get_product_*
+  等桥未暴露的方法，按需接入
