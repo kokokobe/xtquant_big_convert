@@ -37,3 +37,6 @@ src/BIGQMT_DRYRUN_NO_REDIS_FLAT_ALL_IN_ONE.py
 # 本地运行报告（含账号信息，勿提交）
 tools/rpc_coverage_report*.txt
 tools/order_concurrency_report.txt
+tools/adapt_stderr.txt
+tools/adapt_stdout.txt
+tools/sweep_stdout.txt
