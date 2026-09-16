@@ -1,7 +1,7 @@
-1) ping 延迟: ['114.41', '109.16', '108.43', '109.10', '109.02'] ms (avg 110.03)
+1) ping 延迟: ['107.42', '107.74', '108.94', '108.03', '109.29'] ms (avg 108.28)
    预期亚毫秒(切线程的收益): ✗ 仍受 tick 节奏影响
 2) get_positions (deferred): ok=True rows=6 17ms 样本={"stock_code": "159792.SZ", "volume": 1500, "cost": 0.6203000066666666}
    交易数据非空(deferred 路径工作): ✓
    get_asset: ok=True cash=1000.0 total=407558.37
-3) get_market_data_ex (listener 线程): ok=True rows=11 217ms
-4) submit_order: ok=True status=SUBMITTED uoid=bg-smoke 3178ms
+3) get_market_data_ex (listener 线程): ok=True rows=11 199ms
+4) submit_order: ok=True status=SUBMITTED uoid=bg-smoke 3095ms

@@ -267,7 +267,9 @@ TIMEOUT=数据服务依赖（#143 挂 60-90s，慎调）；**空参 TypeError �
   30s 超时级联劣化。**保持 False（drain 模式）**：三天稳定、数据正确。代价是
   RPC 往返 ~50-95ms（adjust 100ms tick），对信号推送（总线亚毫秒）无影响。
    交易上下文方法本就由 LISTENER_DEFERRED_METHODS 强制走 adjust，切换无收益。
-   另注意：sim 柜台实测中出现过 cash=1000.0 异常，排查时先核对终端委托/成交记录
+   另注：cash=1000.0 已由用户核实为模拟柜台执行了测试买单（LIMIT 价高于市价
+   立即成交）——**反向实锤了 submit_order → 模拟柜台 → 成交 → 资金更新 的完整
+   交易链路**；后续纯设施测试建议关 allow_order_methods 或用极小量
 - **⚠️ 同步下载在 drain 线程上 = 死锁（2026-09-16 14:46 实测）**：内联调用
    `download_history_data`/`down_history_data` 下载**本地没有的新数据**时，
   adjust 线程永久冻结（ping 冻结、cadence 停摆，QMT 下载完成回调落在被阻塞的
