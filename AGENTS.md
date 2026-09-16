@@ -267,9 +267,12 @@ TIMEOUT=数据服务依赖（#143 挂 60-90s，慎调）；**空参 TypeError �
   30s 超时级联劣化。**保持 False（drain 模式）**：三天稳定、数据正确。代价是
   RPC 往返 ~50-95ms（adjust 100ms tick），对信号推送（总线亚毫秒）无影响。
    交易上下文方法本就由 LISTENER_DEFERRED_METHODS 强制走 adjust，切换无收益。
-   另注：cash=1000.0 已由用户核实为模拟柜台执行了测试买单（LIMIT 价高于市价
-   立即成交）——**反向实锤了 submit_order → 模拟柜台 → 成交 → 资金更新 的完整
-   交易链路**；后续纯设施测试建议关 allow_order_methods 或用极小量
+   另注（2026-09-16 用户核实）：**账户 52625295 是多终端共享账户，其他终端的
+   自动交易在动它的资金**（cash 63464.87→1000.0 为其他终端自动买入所致，
+   非桥/非模拟柜台问题）——而桥的 submit_order 走真网关（BigQmtOrderGateway，
+   status=SUBMITTED=真 passorder，非 DRY_RUN），**下单测试会直接进入该共享
+   账户与其它终端的策略互相影响**。测试下单前：① 查/撤测试挂单；② 强烈
+   建议换独立模拟账号或关 rpc_allow_order_methods
 - **⚠️ 同步下载在 drain 线程上 = 死锁（2026-09-16 14:46 实测）**：内联调用
    `download_history_data`/`down_history_data` 下载**本地没有的新数据**时，
   adjust 线程永久冻结（ping 冻结、cadence 停摆，QMT 下载完成回调落在被阻塞的
