@@ -1,0 +1,21 @@
+{
+ "get_finance": "BIZ(AttributeError: 'ContextInfo' object has)",
+ "get_universe": "PASS",
+ "get_scale_and_rank": "BIZ(TypeError: get_scale_and_rank() takes 2 )",
+ "get_scale_and_stock": "BIZ(TypeError: get_scale_and_stock() missing)",
+ "get_largecap": "TIMEOUT",
+ "get_midcap": "TIMEOUT",
+ "get_smallcap": "TIMEOUT",
+ "is_suspended_stock": "PASS",
+ "stockcode_in_rzrk": "BIZ(NotImplementedError: ContextInfo.stockco)",
+ "is_fund": "TIMEOUT",
+ "is_stock": "TIMEOUT",
+ "is_future": "TIMEOUT",
+ "get_instrument": "TIMEOUT",
+ "query_stock_position": "PASS",
+ "get_ticks": "TIMEOUT",
+ "get_hkt_exchange_rate": "PASS",
+ "get_value_by_order_id": "PASS",
+ "submit_download_history_data": "PASS",
+ "quote_subscription_status": "BIZ(RuntimeError: whole-quote push subscript)"
+}

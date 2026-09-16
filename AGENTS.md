@@ -191,6 +191,66 @@ signaler 回环自连；`Context.instance()` 不随策略停止回收，留僵�
     传导），验证时整族跳过
   - ⏳ **异步回调族（信用/融资融券 ~14 个）**：handler 等 QMT 回调，回调不落地阻塞
     35-90s（#202 已知，代码注释明说"adjust 线程 = 等待会把它堵死"）
+
+## RPC 参数用法手册（2026-09-16 带参实弹，tools/param_manual_sweep.py）
+
+**判定规则**：PASS=真实数据返回；BIZ=端到端通但业务层拒绝（终审结论）；
+TIMEOUT=数据服务依赖（#143 挂 60-90s，慎调）；**空参 TypeError ≠ 不可用，
+必须带参实测**。
+
+### ✅ 即答可用（本地数据/纯计算，drain 模式安全）
+
+| 方法 | 参数形态 | 备注 |
+|---|---|---|
+| get_market_data_ex | stock_list, period, start_time, end_time | 行情主通道，DataFrame 回包 |
+| get_full_tick | stock_list | 五档/tick |
+| get_positions / get_asset / query_orders / query_trades / query_execution_snapshot / query_account_infos / query_account_status / get_position_statistics / sync_positions / query_stock_position(stock_code) | 常规 | 账户/持仓/委托全通 |
+| submit_order / passorder / cancel_order | 见 ORDER_METHODS | 模拟柜台 60 并发实测 |
+| get_trading_dates(market, start, end, count) / get_trading_calendar / get_market_last_trade_date(market) | market="SH" | 104KB 日历 |
+| get_financial_data(stock_list, table_list=["Capital"], start_time, end_time) | **stock_list 批量**（不是 stock_code） | 框架通；值需终端数据管理先补财务数据 |
+| get_north_finance_change(start_time, end_time) | 日期 | 北向资金 489B |
+| get_stock_list_in_sector(sector_name) | sector_name="沪深300" | 5222 成分 |
+| get_sector_list(**allow_fallback=True**) | 逃逸参数 | 13 知名板块；不含自建板块 |
+| get_hkt_exchange_rate(market="HK") | market | 真实港币汇率 0.88/0.83 |
+| get_hkt_statistics / get_option_undl_data / get_option_detail_data(+batch) / get_main_contract / get_his_contract_list / get_his_index_data / get_contract_expire_date / get_contract_multiplier | 各自签名 | 期权/合约族 |
+| is_suspended_stock(stock_code) | stock_code | false=未停牌 |
+| get_value_by_order_id(order_id) | order_id | 需真实委托号 |
+| get_divid_factors(stock_code) / get_turnover_rate / get_turn_over_rate / get_weight_in_index / get_risk_free_rate / get_date_location / get_raw_financial_data(field_list, stock_list, ...) | 各自签名 | 全通 |
+| get_universe() | 无参 | 返回 []（桥策略未 set_universe） |
+| download_history_data(stock_code, period, start, end) / download_history_data2(stock_list, ...) | 单票/批量 | 本地已有数据秒回；**新数据内联调用会死锁，必须走异步任务** |
+| submit_download_history_data(2)(stock_list, period, start, end) | job_id 秒回 | 异步任务（download_jobs_enabled=True） |
+| get_download_status(job_id) / wait_download(job_id) | job_id | 轮询/等待任务 |
+| download_holiday_data() / download_his_st_data(...) | 无参/简单 | PASS |
+| datetime_to_timetag / timetag_to_datetime | 时间字符串 | 纯计算 |
+| ping / probe_capabilities / probe_order_identity / get_deployment_info / reload_deployment / reload_status | 无参 | 系统 |
+
+### ⏳ 数据服务依赖（TIMEOUT 20s 窗口，实际挂 60-90s，慎调）
+
+| 方法 | 备注 |
+|---|---|
+| is_fund / is_stock / is_future(stock_code) | 看似简单，内部查品种库 → 挂 |
+| get_instrument_detail / get_instrumentdetail(stock_code) | 合约详情查品种库 → 挂 |
+| get_ticks(codes) | tick 数据服务 → 挂 |
+| get_largecap / get_midcap / get_smallcap(stock_list) | 市值分类查服务 → 挂 |
+| get_scale_and_stock(stock_value, ...) | 同上 |
+| get_local_data / get_market_data（**用 get_market_data_ex 替代**） | 原生路径 |
+| get_sector_list（不带 allow_fallback）/ get_sector_info / get_sector_list 相关读 | 原生路径 |
+| get_holder_num / get_option_list / get_option_iv / get_option_undl / get_factor_data / get_float_caps / get_cb_info / get_close_price / get_last_close / get_last_volume / get_svol / get_bvol / get_total_share / get_trade_times / get_longhubang / get_markets / get_open_date / get_ipo_info / get_his_st_data / get_hkt_details / bsm_iv / bsm_price / download_cb_data / gen_factor_index | 原生 xtdata 阻塞族（快扫 TIMEOUT 名单） |
+
+### ❌ 终端缺失（BIZ 终审，NotImplementedError/RuntimeError）
+
+| 方法 | 判决 |
+|---|---|
+| call_formula / subscribe_formula / unsubscribe_formula / get_formula_result | ContextInfo 无公式系统 |
+| download_etf_info / download_financial_data / download_financial_data2 | ContextInfo 无（财务数据用终端 数据管理 UI 补，get_financial_data 读） |
+| download_history_contracts / download_index_weight / download_sector_data / get_l2_transaction / subscribe_l2thousand | needs native xtdata SDK |
+| get_his_option_list / get_his_option_list_batch | ContextInfo 无 |
+| add_sector / add_stock_to_sector / reset_sector_stock_list | #143：报成功但板块没变（写通道坏） |
+| get_finance(stock_code) | **QMT 实现缺陷**：方法存在但内部引用缺失属性（AttributeError），编辑器/交易面板上下文差异待查 |
+| stockcode_in_rzrk | ContextInfo 无 |
+| subscribe_whole_quote / unsubscribe_whole_quote / quote_keepalive / quote_subscription_status / quote_unsubscribe_all | shm 部署无全推推送通道（quote push 显式禁用） |
+| get_scale_and_rank(index_name) | 分发通；QMT 返回数据待验证（签名已实测校准为单参数） |
+| 信用/两融异步族 14 个 | #202 阻塞 |
 - **教训**：连续 UNREACHABLE 时先 dump 请求环/应答环（`_Ring` 外部可读）区分"服务端
   没处理"vs"应答迟到"，不要急着加超时——本次三轮"失败"实为测试超时 < 服务端固有
   延迟，且上一轮的慢请求积压会污染下一轮

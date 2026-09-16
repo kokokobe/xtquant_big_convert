@@ -1,0 +1,21 @@
+  get_finance                        BIZ    财务数据  AttributeError: 'ContextInfo' object has no attribute 'get_finance'
+  get_universe                       PASS   策略订阅列表  []
+  get_scale_and_rank                 BIZ    市值排名  TypeError: get_scale_and_rank() takes 2 positional arguments but 3 were given
+  get_scale_and_stock                BIZ    市值分类  TypeError: get_scale_and_stock() missing 2 required positional arguments: 'stockValue' and
+  get_largecap                       TIMEOUT      大盘股 (原生阻塞嫌疑)
+  get_midcap                         TIMEOUT      中盘股 (原生阻塞嫌疑)
+  get_smallcap                       TIMEOUT      小盘股 (原生阻塞嫌疑)
+  is_suspended_stock                 PASS   停牌判定  false
+  stockcode_in_rzrk                  BIZ    两融名单  NotImplementedError: ContextInfo.stockcode_in_rzrk is not available
+  is_fund                            TIMEOUT      基金判定 (原生阻塞嫌疑)
+  is_stock                           TIMEOUT      股票判定 (原生阻塞嫌疑)
+  is_future                          TIMEOUT      期货判定 (原生阻塞嫌疑)
+  get_instrument                     TIMEOUT      合约信息 (原生阻塞嫌疑)
+  query_stock_position               PASS   单票持仓  {"stock_code": "513300.SH", "volume": 29100, "available": 29100, "cost": 2.445100000343643, "stock_name": "纳斯达
+  get_ticks                          TIMEOUT      分笔/tick (原生阻塞嫌疑)
+  get_hkt_exchange_rate              PASS   港股汇率  {"askReferenceRate": 0.8817, "bidReferenceRate": 0.8303, "dayBuyRiseRate": 0.0, "daySaleRiseRate": 0.0}
+  get_value_by_order_id              PASS   按委托号查(需真实单)  {}
+  submit_download_history_data       PASS   单票异步下载  {"job_id": "80c457c7bb924aa3", "method": "download_history_data2", "stock_list": ["510300.SH"], "period": "1d"
+  quote_subscription_status          BIZ    全推订阅状态(push 未配置应报错)  RuntimeError: whole-quote push subscription is not configured on this server
+---- 汇总: PASS=6 BIZ=5 TIMEOUT=8 / 19
+DONE

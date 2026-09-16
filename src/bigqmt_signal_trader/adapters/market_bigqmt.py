@@ -1915,13 +1915,18 @@ class BigQmtMarketDataProvider:
         """ContextInfo.get_universe(): 本策略当前订阅的合约列表。"""
         return self._call_context("get_universe")
 
-    def get_scale_and_rank(self, index_name, sort_type=1):
-        """ContextInfo.get_scale_and_rank(index_name, sort_type): 板块内市值排名。"""
-        return self._call_context("get_scale_and_rank", index_name, sort_type)
+    def get_scale_and_rank(self, index_name):
+        """ContextInfo.get_scale_and_rank(index_name): 板块内市值排名。
+        （实测 2026-09-16: 只收 1 个位置参数，传 2 个报 takes 2 but 3 given）"""
+        return self._call_context("get_scale_and_rank", index_name)
 
-    def get_scale_and_stock(self, index_name):
-        """ContextInfo.get_scale_and_stock(index_name): 板块内按市值分类。"""
-        return self._call_context("get_scale_and_stock", index_name)
+    def get_scale_and_stock(self, stock_value, market=None):
+        """ContextInfo.get_scale_and_stock(stockValue, ...): 按市值分类。
+        （实测: 缺 stockValue 等 2 个必填参数，第二参语义待定——
+        该族函数在数据服务依赖场景会阻塞，慎在 drain 模式高频调用）"""
+        if market is None:
+            return self._call_context("get_scale_and_stock", stock_value)
+        return self._call_context("get_scale_and_stock", stock_value, market)
 
     def get_largecap(self, stock_list):
         """ContextInfo.get_largecap(stock_list): 大盘股筛选。"""
