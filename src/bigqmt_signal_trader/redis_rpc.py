@@ -111,6 +111,10 @@ READ_METHODS = {
     "get_option_subject_position",
     "get_comb_option",
     "get_hkt_exchange_rate",
+    # 进程间发布总线（pub_bus: mmap 环形缓冲 + 命名事件, 零 TCP pub/sub）
+    "bus_publish",
+    "bus_inbox_start",
+    "bus_inbox_drain",
 }
 
 ORDER_METHODS = {
@@ -1604,6 +1608,32 @@ class BigQmtRpcHandlers:
             poll_interval_seconds=float(params.get("poll_interval_seconds", 0.5)),
         )
 
+
+    def _handle_bus_publish(self, params):
+        """向进程间发布总线发一条消息（外部订阅者实时收到，零 TCP）。"""
+        from .pub_bus import get_publisher
+
+        topic = str(params.get("topic") or "default")
+        seq = get_publisher(self.account_id).publish(topic, params.get("data"))
+        return {"published": True, "topic": topic, "seq": seq}
+
+    def _handle_bus_inbox_start(self, params):
+        """启动外部→QMT 通知的收件箱（后台线程订阅总线, 幂等）。"""
+        from .pub_bus import get_inbox_receiver
+
+        topics = params.get("topics")
+        receiver = get_inbox_receiver(self.account_id, topics=topics)
+        receiver.start()
+        return {"started": True, "topics": sorted(topics) if topics else None}
+
+    def _handle_bus_inbox_drain(self, params):
+        """取走收件箱内全部累积消息（外部→QMT 通知）。"""
+        from .pub_bus import get_inbox_receiver
+
+        topics = params.get("topics")
+        receiver = get_inbox_receiver(self.account_id, topics=topics)
+        receiver.start()          # 幂等: 未启动则启动
+        return {"messages": receiver.drain()}
 
     def _handle_get_ticks(self, params):
         codes = params.get("codes")
