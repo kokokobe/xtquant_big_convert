@@ -185,6 +185,15 @@ LISTENER_DEFERRED_METHODS = {
     "get_value_by_order_id",
     "get_last_order_id",
     "get_history_trade_detail_data",
+    # 订单族强制走 adjust 线程（2026-09-16）：passorder/结算等待/order_watch
+    # 依赖主策略线程上下文；bg 模式下内联在 listener 线程执行实测阻塞接收
+    # 线程 3s+/级联超时。与 LISTENER_DEFERRED 的 #252 语义一致——交易上下文
+    # 方法一律不在接收线程跑。
+    "submit_order",
+    "submit_orders_batch",
+    "cancel_order",
+    "cancel_orders_batch",
+    "passorder",
 }
 
 # Trade-context queries route through QMT's get_trade_detail_data, which
