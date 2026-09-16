@@ -261,18 +261,18 @@ TIMEOUT=数据服务依赖（#143 挂 60-90s，慎调）；**空参 TypeError �
   download_his_st_data；TIMEOUT 名单见 tools/market_data_sweep_report.txt。
   **下单链路**：submit_order 60 并发全受理进模拟柜台，60/60 唯一 id，资金/持仓
   零变化；并发下单注意 #304（0.3.44 drain 每拍限时 + 过期拒绝）
-- **⚠️ rpc_background_threads=True 在本终端不可用（2026-09-16 实测回退）**：
-  切后台线程模式后 ping 110ms（listener 未即时处理）、get_asset 返回 cash=1000.0
-  （真实 63464.87——**数据正确性错误**，比慢更严重）、submit 3.1s、query_orders
-  30s 超时级联劣化。**保持 False（drain 模式）**：三天稳定、数据正确。代价是
-  RPC 往返 ~50-95ms（adjust 100ms tick），对信号推送（总线亚毫秒）无影响。
-   交易上下文方法本就由 LISTENER_DEFERRED_METHODS 强制走 adjust，切换无收益。
+- **⚠️ rpc_background_threads=True 实测终审（2026-09-16 回退定案）**：功能可用
+  （deferred 闸门工作、下单/查询都能通），**但无延迟收益**——真实桥里所有请求
+  仍走 ~100ms adjust 节奏（listener 线程的事件唤醒未兑现亚毫秒，机制在 QMT
+  内部线程模型），且偶发 15s 级瞬断（get_asset 挂 15s 后自愈）。**保持 False
+  （drain 模式）定案**：三天稳定、数据正确、复杂度更低。代价仅 RPC 往返
+  ~50-95ms（adjust 100ms tick），对信号推送（总线亚毫秒）无影响。
    另注（2026-09-16 用户核实）：**账户 52625295 是多终端共享账户，其他终端的
    自动交易在动它的资金**（cash 63464.87→1000.0 为其他终端自动买入所致，
-   非桥/非模拟柜台问题）——而桥的 submit_order 走真网关（BigQmtOrderGateway，
-   status=SUBMITTED=真 passorder，非 DRY_RUN），**下单测试会直接进入该共享
-   账户与其它终端的策略互相影响**。测试下单前：① 查/撤测试挂单；② 强烈
-   建议换独立模拟账号或关 rpc_allow_order_methods
+   非桥/非模拟柜台问题，桥读数正确）——而桥的 submit_order 走真网关
+   （BigQmtOrderGateway，status=SUBMITTED=真 passorder，非 DRY_RUN），**下单
+   测试会直接进入该共享账户与其它终端的策略互相影响**。测试下单前：① 查/撤
+   测试挂单；② 强烈建议换独立模拟账号或关 rpc_allow_order_methods
 - **⚠️ 同步下载在 drain 线程上 = 死锁（2026-09-16 14:46 实测）**：内联调用
    `download_history_data`/`down_history_data` 下载**本地没有的新数据**时，
   adjust 线程永久冻结（ping 冻结、cadence 停摆，QMT 下载完成回调落在被阻塞的
