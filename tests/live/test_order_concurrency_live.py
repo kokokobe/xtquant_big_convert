@@ -38,9 +38,12 @@ _lock = threading.Lock()
 
 
 def call(client, method, params=None, timeout=30.0):
+    # 信封 request_id 必须全局唯一: 并发下毫秒时间戳会撞车, 服务端 #300 去重
+    # 会把同 id 的第二个请求当重试, 用第一个请求的应答回答（响应别名）。
+    import uuid as _uuid
     request = {
         "schema_version": 1,
-        "request_id": "ot-%s-%d" % (method, int(time.time() * 1000)),
+        "request_id": "ot-%s-%s" % (method, _uuid.uuid4().hex[:12]),
         "account_id": ACCOUNT,
         "method": method,
         "params": dict(params or {}),
@@ -66,10 +69,10 @@ def main(report=None):
             emit("!! allow_order_methods 仍为 False —— 桥没重启加载新配置, 终止")
             return 1
 
-        # 2) 基线持仓 + 现价
+        # 2) 基线持仓 + 现价（get_positions 返回 {code: row} dict）
         pos_before = call(client, "get_positions")
         data_before = pos_before.get("data") or {}
-        rows_before = len(data_before.get("positions") or data_before.get("rows") or [])
+        rows_before = len(data_before) if isinstance(data_before, dict) else 0
         emit("get_positions(基线): ok=%s rows=%s" % (pos_before.get("ok"), rows_before))
         ticks = call(client, "get_full_tick", {"stock_list": STOCKS}, timeout=20.0)
         prices = {}
@@ -98,7 +101,11 @@ def main(report=None):
             emit("!! 冒烟单失败, 终止并发阶段")
             return 1
 
-        # 4) 并发压测
+        # 4) 并发压测。网关可能是 DRY_RUN（纯模拟）或 SUBMITTED（QMT 模拟柜台
+        #    passorder——面板账户是模拟时单子进模拟层），两者都算通。
+        #    signal_id 用 uuid: 毫秒时间戳在同一线程池同毫秒内会撞名，撞名走
+        #    #300 去重后 user_order_id 合并，统计就失真。
+        import uuid as _uuid
         results = []
         errors = []
         t0 = time.time()
@@ -107,7 +114,7 @@ def main(report=None):
             for i in range(PER_THREAD):
                 code = STOCKS[(wid + i) % len(STOCKS)]
                 action = "BUY" if (wid + i) % 2 == 0 else "SELL"
-                sig = "conc-w%d-i%d-%d" % (wid, i, int(time.time() * 1000))
+                sig = "conc-w%d-i%d-%s" % (wid, i, _uuid.uuid4().hex[:8])
                 try:
                     r = call(client, "submit_order", {
                         "stock_code": code, "action": action, "volume": 100,
@@ -135,9 +142,9 @@ def main(report=None):
         elapsed = time.time() - t0
 
         ok_cnt = sum(1 for r in results if r[4])
-        dry_cnt = sum(1 for r in results if r[5] == "DRY_RUN")
+        dry_cnt = sum(1 for r in results if r[5] in ("DRY_RUN", "SUBMITTED"))
         uoids = [r[6] for r in results if r[6]]
-        emit("---- 并发汇总: %d 线程 x %d 单 = %d 发出, ok=%d, DRY_RUN=%d, "
+        emit("---- 并发汇总: %d 线程 x %d 单 = %d 发出, ok=%d, 已受理=%d, "
              "耗时 %.1fs (%.0f 单/s)"
              % (THREADS, PER_THREAD, THREADS * PER_THREAD, ok_cnt, dry_cnt,
                 elapsed, THREADS * PER_THREAD / elapsed if elapsed else 0))
@@ -147,9 +154,9 @@ def main(report=None):
             emit("   异常 %d 个:" % len(errors))
             for e in errors[:10]:
                 emit("     %s" % (e,))
-        bad = [r for r in results if not r[4] or r[5] != "DRY_RUN"]
+        bad = [r for r in results if not r[4] or r[5] not in ("DRY_RUN", "SUBMITTED")]
         if bad:
-            emit("   非 DRY_RUN/失败 明细(前10):")
+            emit("   异常状态/失败 明细(前10):")
             for r in bad[:10]:
                 emit("     %s" % (str(r).encode("gbk", "replace").decode("gbk"),))
 

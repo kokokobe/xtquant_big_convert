@@ -194,3 +194,15 @@ signaler 回环自连；`Context.instance()` 不随策略停止回收，留僵�
 - **教训**：连续 UNREACHABLE 时先 dump 请求环/应答环（`_Ring` 外部可读）区分"服务端
   没处理"vs"应答迟到"，不要急着加超时——本次三轮"失败"实为测试超时 < 服务端固有
   延迟，且上一轮的慢请求积压会污染下一轮
+- **market_data 族快扫（tools/sweep_market_data.py，ping 探空 + 20s 实弹）**：90 个
+  方法 = 6 PASS + 44 REACHABLE（空参 TypeError/NotImplementedError = 分发通）+
+  40 TIMEOUT（原生 xtdata 阻塞族，本终端无法服务）。PASS 的有 get_market_data_ex/
+  get_option_undl_data/get_turnover_rate/get_risk_free_rate/download_holiday_data/
+  download_his_st_data；TIMEOUT 名单见 tools/market_data_sweep_report.txt。
+  **下单链路**：submit_order 60 并发全受理进模拟柜台，60/60 唯一 id，资金/持仓
+  零变化；并发下单注意 #304（0.3.44 drain 每拍限时 + 过期拒绝）
+- **REACHABLE ≠ 不可用**：空参 TypeError 只说明分发通。带真实参数实测
+  `download_history_data`（513300.SH 1d 两周）→ ok=True 且 get_market_data_ex
+  读回 11 个交易日 OHLC——下载族走 ContextInfo 通道可用（tools/
+  test_download_history.py），qmt_globals 的 false 只代表全局函数未注入，
+  ContextInfo 方法在。**下结论前必须带参实测**
