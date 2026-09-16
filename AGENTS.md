@@ -206,3 +206,8 @@ signaler 回环自连；`Context.instance()` 不随策略停止回收，留僵�
   读回 11 个交易日 OHLC——下载族走 ContextInfo 通道可用（tools/
   test_download_history.py），qmt_globals 的 false 只代表全局函数未注入，
   ContextInfo 方法在。**下结论前必须带参实测**
+- **TIMEOUT ≠ 不可用，可能是超时窗口 < 原生挂起时长**：get_sector_list 实测
+  `allow_fallback=true` 秒回 13 个知名板块名 → get_stock_list_in_sector("沪深A股")
+  5222 成分 ✓（#130 教训：适配器默认拒绝返回假列表，逃逸参数是显式设计的）。
+  用户引用的迅投通用文档里 get_sector_list 是系统函数，但本终端 ContextInfo
+  只有 create_sector/get_sector/get_stock_list_in_sector 三个板块方法（probe 实锤）
