@@ -546,40 +546,17 @@ _runtime = _local_import("bigqmt_signal_trader_redis_rpc_runtime", globals(), fr
 
 
 def _load_local_config():
-    # Precedence (2026-09-15): the operator's external
-    # bigqmt_signal_trader_local_config.py (deployed beside the strategy in
-    # QMT's python dir) wins over the embedded placeholder block. The
-    # placeholder carries YOUR_ACCOUNT_ID and transport=zmq, so shadowing the
-    # external file silently broke per-account wiring -- queue names, shm
-    # section names and derived ports all drifted to placeholder values
-    # (bridge bound 15560 and ran as account "YOUR_ACCOUNT_ID" while the
-    # operator's config said 52625295 + shm). A stale module left by a
-    # previous strategy load must not survive either: whenever the external
-    # file exists we re-exec it from disk; only when it does not exist do we
-    # fall back to the embedded placeholder (marked __bigqmt_flat_builtin__).
-    external_path = None
-    for entry in sys.path:
-        if not entry or not os.path.isdir(entry):
-            continue
-        candidate = os.path.join(entry, "bigqmt_signal_trader_local_config.py")
-        if os.path.isfile(candidate):
-            external_path = candidate
-            if entry.endswith(os.sep + "python"):
-                break
-    if external_path is not None:
-        import importlib.util as _importlib_util
-        spec = _importlib_util.spec_from_file_location(
-            "bigqmt_signal_trader_local_config", external_path)
-        module = _importlib_util.module_from_spec(spec)
-        sys.modules["bigqmt_signal_trader_local_config"] = module
-        spec.loader.exec_module(module)
-        print("[bigqmt_shell] external local config used: %s" % external_path)
-        return module
+    # Build the local config module directly from the shell config block and
+    # force it into sys.modules. This bypasses _mod_N() execution, closure
+    # cells, __export_module__ and any stale same-named module a previous
+    # strategy load may have left in the QMT process.
     account = _SHELL_CONFIG.get("BIGQMT_ACCOUNT_ID", "")
     redis_config = _SHELL_CONFIG.get("BIGQMT_REDIS_CONFIG", {})
-    module = types.ModuleType("bigqmt_signal_trader_local_config")
-    module.__bigqmt_flat_builtin__ = True
-    sys.modules["bigqmt_signal_trader_local_config"] = module
+    module = sys.modules.get("bigqmt_signal_trader_local_config")
+    if module is None or not getattr(module, "__bigqmt_flat_builtin__", False):
+        module = types.ModuleType("bigqmt_signal_trader_local_config")
+        module.__bigqmt_flat_builtin__ = True
+        sys.modules["bigqmt_signal_trader_local_config"] = module
     module.BIGQMT_ACCOUNT_ID = account
     module.BIGQMT_REDIS_CONFIG = redis_config
     if not account:
@@ -590,22 +567,17 @@ def _load_local_config():
 try:
     _config = _load_local_config()
     BIGQMT_REDIS_CONFIG = getattr(_config, "BIGQMT_REDIS_CONFIG", {})
-    # Default is zmq (the historical no-redis wire). An explicit "shm" in the
-    # local config opts into the zero-TCP transport (2026-09-15) and is
-    # honored -- anything else keeps the zmq force so a typo cannot fall
-    # through to a redis attempt that would trip the terminal audit scan.
+    # Force zmq transport (this is the no-redis version).
     BIGQMT_REDIS_CONFIG = dict(BIGQMT_REDIS_CONFIG or {})
-    if str(BIGQMT_REDIS_CONFIG.get("transport") or "").lower() != "shm":
-        BIGQMT_REDIS_CONFIG["transport"] = "zmq"
+    BIGQMT_REDIS_CONFIG["transport"] = "zmq"
     # setdefault: an explicit False is the #183 drain opt-in, worth 4-6x lower
     # latency on zmq, and assignment overwrote it (#188).
     BIGQMT_REDIS_CONFIG.setdefault("rpc_background_threads", True)
     # Nothing here can reach redis, so say so instead of letting the runtime
     # fill in 127.0.0.1:6379 from its defaults (issues #145 / #147).
     BIGQMT_REDIS_CONFIG["redis_enabled"] = False
-    print("[bigqmt_shell] no-redis mode: transport=%s background_threads=%s "
-          "redis_enabled=False" % (BIGQMT_REDIS_CONFIG["transport"],
-                                   BIGQMT_REDIS_CONFIG["rpc_background_threads"]))
+    print("[bigqmt_shell] no-redis mode: transport=zmq background_threads=%s "
+          "redis_enabled=False" % BIGQMT_REDIS_CONFIG["rpc_background_threads"])
     _runtime.configure_runtime_redis(BIGQMT_REDIS_CONFIG)
 except Exception as redis_config_error:
     print("[bigqmt_shell] local redis config load failed: %s" % redis_config_error)
