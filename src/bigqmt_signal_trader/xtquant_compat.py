@@ -28,6 +28,7 @@ from xtquant import xtconstant as _xtconstant
 from xtquant.xtconstant import ORDER_UNKNOWN, STOCK_BUY, STOCK_SELL
 from xtquant.xttype import StockAccount
 
+from .code_utils import is_bond_code
 from .full_tick_cache import request_full_tick_cache, wait_full_tick_cache
 from .local_cache import LocalMarketCache
 from .order_id import OrderId, order_sys_id_of
@@ -291,6 +292,35 @@ def _quote_push_zmq_address(client):
     return "tcp://%s:%d" % (host, base_port + 1)
 
 
+def _build_quote_push_channel(client):
+    """Build the push-channel subscriber matching the RPC transport: redis
+    deployments derive the channel locally; zmq deployments connect to the
+    server PUB socket (host from zmq config, RPC port + 1).
+
+    Module-level on purpose: BigQmtXtTrader's exec-event listener needs it too,
+    and when it lived only on BigQmtXtData the trader's call raised
+    AttributeError into a silent retry loop — zmq deployments never got a
+    single exec callback (#366, broken since #76).
+
+    pipe/mysql 且没有显式 redis 配置时直接报错而不是拨默认的
+    127.0.0.1:6379——外连即杀的沙箱里那一次拨号就是杀进程（2026-09-24
+    实盘逐行核对）。
+    """
+    from .quote_push_channel import RedisQuotePushChannel, ZmqQuotePushChannel
+
+    transport_name = str(getattr(client, "transport_name", "redis") or "redis").lower()
+    if transport_name in ("zmq",):
+        address = _quote_push_zmq_address(client)
+        return ZmqQuotePushChannel(connect_address=address)
+    if (transport_name not in ("redis", "", "default")
+            and not getattr(client, "_redis_explicit", True)):
+        raise RuntimeError(
+            "transport=%s 没有全推推送通道（服务端 0.3.58 起也不再发）："
+            "请改用 get_full_tick 轮询；或在客户端配置里显式给出 redis 块，"
+            "全推才会走 redis pub/sub。" % transport_name)
+    return RedisQuotePushChannel(client._redis(), account_id=client.account_id)
+
+
 def _missing_account_id_message():
     """Say what was searched and what to do, not just that something is missing.
 
@@ -428,6 +458,24 @@ def _action_to_order_type(action):
     return 0
 
 
+def _action_of_row(row):
+    """BUY/SELL string for a queried order/trade object (#372 轮询事件用).
+
+    方向判据与服务端一致：offset_flag（48 买/49 卖）优先，order_type 兜底。
+    """
+    offset = _safe_int(getattr(row, "offset_flag", None), -1)
+    if offset == 48:
+        return "BUY"
+    if offset == 49:
+        return "SELL"
+    order_type = _safe_int(getattr(row, "order_type", None), 0)
+    if order_type in (STOCK_BUY, CREDIT_BUY, CREDIT_FIN_BUY, CREDIT_BUY_SECU_REPAY):
+        return "BUY"
+    if order_type in (STOCK_SELL, CREDIT_SELL, CREDIT_SLO_SELL, CREDIT_SELL_SECU_REPAY):
+        return "SELL"
+    return ""
+
+
 def _safe_int(value, default=0):
     try:
         return int(value)
@@ -496,6 +544,69 @@ def _credit_order_type_from_op(op_type, fallback):
     except (TypeError, ValueError):
         return fallback
     return _CREDIT_ORDER_TYPE_BY_OP.get(value, fallback)
+
+
+# enum_EEntrustTypes（迅投知识库）: 54 融资委托 / 55 融券委托 / 57 信用普通委托。
+# reporter 实盘数据（#330, 2026-09-23）: 融资买入 m_eEntrustType=54、担保品
+# 买入=57，而 m_nOpType 两者没有区别——0.3.52 按 m_nOpType 的判据因此
+# 对这批终端永不生效。m_eEntrustType + 开平方向才是可靠判据。
+_CREDIT_ORDER_TYPE_BY_ENTRUST = {
+    # (entrust_type, is_buy) -> MiniQMT order_type
+    (54, True): 27,    # 融资委托 + 买 = 融资买入 CREDIT_FIN_BUY
+    (54, False): 31,   # 融资委托 + 卖 = 卖券还款 CREDIT_SELL_SECU_REPAY
+    (55, True): 29,    # 融券委托 + 买 = 买券还券 CREDIT_BUY_SECU_REPAY
+    (55, False): 28,   # 融券委托 + 卖 = 融券卖出 CREDIT_SLO_SELL
+    (57, True): 23,    # 信用普通委托 + 买 = 担保品买入 CREDIT_BUY
+    (57, False): 24,   # 信用普通委托 + 卖 = 担保品卖出 CREDIT_SELL
+}
+
+# 「专项」名称只从 m_strOptName 拿（entrust 枚举不分专项）。
+_CREDIT_SPECIAL_UPGRADE = {27: 40, 28: 41, 29: 42, 31: 44, 32: 45}
+
+
+def _credit_order_type_from_entrust(entrust_type, offset_flag, opt_name, fallback):
+    """The MiniQMT order_type from m_eEntrustType + side, else ``fallback``.
+
+    ``opt_name`` 含「专项」时升级到专项族（40-45）；56 信用平仓等未列出的
+    类别回退给调用方的下一个判据。
+    """
+    try:
+        entrust = int(entrust_type)
+    except (TypeError, ValueError):
+        return fallback
+    try:
+        side = int(offset_flag)
+    except (TypeError, ValueError):
+        return fallback
+    if side == 48:
+        is_buy = True
+    elif side == 49:
+        is_buy = False
+    else:
+        return fallback
+    mapped = _CREDIT_ORDER_TYPE_BY_ENTRUST.get((entrust, is_buy))
+    if mapped is None:
+        return fallback
+    if "专项" in str(opt_name or ""):
+        mapped = _CREDIT_SPECIAL_UPGRADE.get(mapped, mapped)
+    return mapped
+
+
+def _credit_order_type_for_row(item, fallback):
+    """Credit order_type for a snapshot dict: entrust first, op second (#330).
+
+    0.3.55+ 的服务端在快照里带 m_eEntrustType；老服务端/老终端没有它时
+    退回 0.3.52 的 m_nOpType 映射，再不行才用方向推的 23/24。
+    """
+    order_type = _credit_order_type_from_entrust(
+        item.get("entrust_type"),
+        item.get("offset_flag", item.get("direction")),
+        item.get("opt_name"),
+        None)
+    if order_type is not None:
+        return order_type
+    return _credit_order_type_from_op(item.get("op_type"), fallback)
+
 
 
 def _account_type_name(value):
@@ -1255,6 +1366,19 @@ class BigQmtRpcClient:
             or ""
         )
         self.redis_client = redis_client
+        # 「用户显式配了 redis」和「默认填充」要分得开：非 redis 传输的客户端
+        # （pipe/mysql）默认没有 redis 可连，事件线程每轮开头那次 ping 会照
+        # 127.0.0.1:6379 拨——在外连即杀的沙箱里一次探测就死（2026-09-24
+        # 实盘逐行核对）。显式信号：合并后的配置或环境变量里给了 host /
+        # username / password 任何一个。
+        self._redis_explicit = bool(
+            merged_redis_config.get("host")
+            or merged_redis_config.get("username")
+            or merged_redis_config.get("password")
+            or os.environ.get("BIGQMT_REDIS_HOST")
+            or os.environ.get("BIGQMT_REDIS_USERNAME")
+            or os.environ.get("BIGQMT_REDIS_PASSWORD")
+        )
         self.redis_config = {
             "host": merged_redis_config.get("host") or os.environ.get("BIGQMT_REDIS_HOST", "127.0.0.1"),
             "port": int(merged_redis_config.get("port") or _env_int("BIGQMT_REDIS_PORT", 6379)),
@@ -1719,6 +1843,62 @@ def _markets_of(codes):
     return markets
 
 
+# Which instrument kinds a market token has to be asked for, per exchange.
+#
+# The server narrows a market token to `types` and defaults to ("stock",) --
+# "SH" becomes the 上证A股 sector listing. So a token request that does not say
+# what it wants silently loses convertibles, funds, ETFs and indices: they are
+# subscribed and pushed, but absent from the first frame (#358). Asking for
+# ["all"] instead costs the whole exchange listing (26744 instruments, ~7.5s on
+# the adjust thread), which is exactly what #247/#104 removed. So infer the
+# kinds from the codes actually asked for.
+#
+# Prefixes are the exchanges' own code segments. Convertibles are not listed
+# here -- code_utils.is_bond_code already owns those prefixes, and duplicating
+# them is how the two copies drift apart.
+#
+#   SH  600/601/603/605/688/689 股票 · 5xx 基金/ETF · 000xxx 指数
+#   SZ  00x/30x 股票 · 15x/16x/18x 基金/ETF · 39xxxx 指数 (980xxx.SZ 也是指数，
+#       不在「沪深指数」板块里，所以不认它)
+#   BJ  43/83/87/88/92 股票 (899050.BJ 北证50 is an index and 沪深指数 does not
+#       carry it, so it stays unclassified on purpose)
+#
+# A code that matches nothing here is NOT guessed at: it goes down the direct
+# per-code path instead, which is slower and right. Guessing is how the codes
+# went missing in the first place.
+_PRIME_TYPES_BY_PREFIX = {
+    "SH": ((("600", "601", "603", "605", "688", "689"), ("stock",)),
+           (("5",), ("fund", "etf")),
+           (("000",), ("index",))),
+    # 30 rather than 300/301: 深证A股 already lists 302132.SZ, and the 30x
+    # segment is 创业板 only, so widening it cannot swallow another kind.
+    "SZ": ((("000", "001", "002", "003", "30"), ("stock",)),
+           (("15", "16", "18"), ("fund", "etf")),
+           (("39",), ("index",))),
+    "BJ": ((("43", "83", "87", "88", "92"), ("stock",)),),
+}
+
+
+def _prime_tick_types(code):
+    """Instrument kinds to narrow a market token to for `code`, or ().
+
+    () means "not confidently classified" -- the caller must not narrow on this
+    code's behalf.
+    """
+    text = str(code or "").strip().upper()
+    if "." not in text:
+        return ()
+    pure, _, market = text.partition(".")
+    if not pure.isdigit():
+        return ()
+    if is_bond_code(text):
+        return ("convertible",)
+    for prefixes, kinds in _PRIME_TYPES_BY_PREFIX.get(market, ()):
+        if pure.startswith(prefixes):
+            return kinds
+    return ()
+
+
 def _full_tick_params(codes, types=None):
     """RPC params for get_full_tick. `types` narrows a whole-market token to one
     instrument kind at REQUEST time -- filtering the reply would still pay QMT's
@@ -1946,7 +2126,7 @@ class BigQmtXtData:
     def _call(self, method, **params):
         return self.client.call(method, params)
 
-    def get_full_tick(self, code_list, timeout_seconds=None, types=None):
+    def get_full_tick(self, code_list, timeout_seconds=None, types=None, market_fallback=True):
         """Fetch full tick data for a list of codes.
 
         Args:
@@ -1955,6 +2135,10 @@ class BigQmtXtData:
                 snapshots, else the client default, DEFAULT_RPC_TIMEOUT_SECONDS).
                 Callers can pass a larger value when querying many codes (e.g. 1256
                 ETF options may need 150-180s).
+            market_fallback: True（默认）时，大名单直读不全或失败会扩读交易所
+                再过滤（#104 的恢复设计）；False 时**不扩读**——缺票照实返回
+                部分结果、原异常原样抛出，且市场重读不再把显式超时硬抬到 60s
+                （#373：接受部分行情的调用方要的就是这个）。
         """
         codes = list(code_list or [])
         if not codes:
@@ -1994,6 +2178,15 @@ class BigQmtXtData:
             rpc_timeout = timeout_seconds
         else:
             rpc_timeout = 30 if upper_codes & {"SH", "SZ", "BJ", "HK"} else None
+        if not market_fallback:
+            # #373: 不扩读。直读即终读——部分结果照实返回，异常原样抛出，
+            # 显式超时就是唯一的超时。
+            return self.client.call(
+                "get_full_tick", _full_tick_params(codes, types),
+                timeout_seconds=rpc_timeout) or {}
+        # 市场重读的超时：调用方显式给了就用它的（#373，不再硬抬 60s）；
+        # 没给才按市场读的成本抬到 60s。
+        market_timeout = timeout_seconds if timeout_seconds is not None else max(rpc_timeout or 0, 60)
         failure = None
         try:
             data = self.client.call(
@@ -2007,8 +2200,13 @@ class BigQmtXtData:
         if self._should_fall_back(codes, upper_codes, data):
             fallback_errors = []
             recovered = self._full_tick_via_markets(
-                codes, rpc_timeout, types, errors=fallback_errors)
+                codes, market_timeout, types, errors=fallback_errors)
             if recovered is not None:
+                if data:
+                    # #373: 直读已拿到的行不能被空回包顶掉——合并，直读行优先。
+                    merged = dict(recovered)
+                    merged.update(data)
+                    return merged
                 return recovered
             if failure is not None:
                 # A bare `raise` here has no active exception -- the except
@@ -2050,7 +2248,7 @@ class BigQmtXtData:
         # than was asked for (issue #104).
         return len(data) < len(set(str(c) for c in codes))
 
-    def _full_tick_via_markets(self, codes, rpc_timeout, types=None, errors=None):
+    def _full_tick_via_markets(self, codes, market_timeout, types=None, errors=None):
         """Read the exchange(s) these codes live on, then filter to them.
 
         A long explicit list is one RPC carrying one timeout, so it either fits
@@ -2061,6 +2259,9 @@ class BigQmtXtData:
         mostly bonds -- "SH" is 26744 instruments of which 2315 are stocks -- so
         reading all of it costs 7.4s against 1.08s for the stocks. No reason to
         pay that when the codes being recovered are stocks (issue #104).
+
+        ``market_timeout`` 由调用方解析好：显式超时原样用（#373），缺省才
+        按市场读的成本抬到 60s。
         """
         markets = _markets_of(codes)
         if not markets:
@@ -2078,7 +2279,7 @@ class BigQmtXtData:
                 for market in sorted(markets):
                     snapshot = self.client.call(
                         "get_full_tick", _full_tick_params([market], attempt),
-                        timeout_seconds=max(rpc_timeout or 0, 60)) or {}
+                        timeout_seconds=market_timeout) or {}
                     for key, value in snapshot.items():
                         if str(key) in wanted:
                             merged[key] = value
@@ -2603,6 +2804,7 @@ class BigQmtXtData:
         backfill_pre_close=True,
         resynth_ongoing_multiday=True,
         heal=True,
+        subscribe=None,
     ):
         """Pull bars over RPC, in batches of ``chunk_size`` codes.
 
@@ -2612,6 +2814,11 @@ class BigQmtXtData:
         waiting for a download it just submitted, and healing there
         re-submits that same download every 1.5s round, pushing the landing
         it is waiting for further back until the 60s budget is gone.
+
+        ``subscribe`` 是 QMT 原生签名的最后一个参数：True（大 QMT 默认）会把
+        查过的标的塞进常驻内存订阅池，批量拉分钟线时终端内存单调上涨直到崩溃
+        （#361）；False 只读本地已下载数据。缺省 None = 不传、维持原生默认。
+        批量历史回补请显式传 ``subscribe=False``。
 
         Cache-through: whatever is fetched is written to the local cache (keyed
         by dividend_type), so it stays the latest -- important for 前复权 data,
@@ -2647,6 +2854,9 @@ class BigQmtXtData:
             dividend_type=dividend_type,
             fill_data=fill_data,
         )
+        if subscribe is not None:
+            # 只在调用方给了才传（#361）：不给 = 大 QMT 原生默认 True，行为不变。
+            base["subscribe"] = bool(subscribe)
         step = DEFAULT_MARKET_DATA_CHUNK if chunk_size is None else int(chunk_size)
 
         if step <= 0 or len(codes) <= step:
@@ -3113,17 +3323,7 @@ class BigQmtXtData:
         )
 
     def _build_quote_push_channel(self):
-        """Build the push-channel subscriber matching the RPC transport: redis
-        deployments derive the channel locally; zmq deployments connect to the
-        server PUB socket (host from zmq config, RPC port + 1)."""
-        client = self.client
-        from .quote_push_channel import RedisQuotePushChannel, ZmqQuotePushChannel
-
-        transport_name = str(getattr(client, "transport_name", "redis") or "redis").lower()
-        if transport_name in ("zmq",):
-            address = _quote_push_zmq_address(client)
-            return ZmqQuotePushChannel(connect_address=address)
-        return RedisQuotePushChannel(client._redis(), account_id=client.account_id)
+        return _build_quote_push_channel(self.client)
 
     def quote_subscription_status(self):
         """What whole-quote combos the bridge thinks are alive, and how stale.
@@ -3163,6 +3363,12 @@ class BigQmtXtData:
         # get_full_tick with those tokens -- QMT handles exchange tokens as
         # whole-exchange operations (fast). Then filter the result to only the
         # codes the caller actually asked for.
+        #
+        # The token path cannot pass ["all"] -- that is the 26744-instrument
+        # read #247 removed -- so it passes the kinds the requested codes
+        # actually are (#358). Saying nothing there is what made convertibles
+        # disappear from the first frame above 100 codes while the push kept
+        # delivering them.
         if callback is not None:
             try:
                 # Called unconditionally, including with an empty snapshot:
@@ -3215,12 +3421,25 @@ class BigQmtXtData:
         if whole:
             wanted = set()
             tokens = set()
+            kinds = set()
             for code in whole:
+                code_kinds = _prime_tick_types(code)
+                if not code_kinds:
+                    # Unclassified: the server would narrow the token to stocks
+                    # and drop this code without saying so (#358). Read it
+                    # directly instead -- slow beats silently absent.
+                    direct.append(code)
+                    continue
                 wanted.add(code.upper())
                 tokens.add(code.rsplit(".", 1)[-1].upper())
-            full = self.get_full_tick(sorted(tokens)) or {}
-            snapshot.update(
-                (k, v) for k, v in full.items() if str(k).upper() in wanted)
+                kinds.update(code_kinds)
+            if tokens:
+                # types= is what keeps the push side and the primer covering the
+                # same instruments: the push is ContextInfo's own
+                # subscribe_whole_quote and is not narrowed at all.
+                full = self.get_full_tick(sorted(tokens), types=sorted(kinds)) or {}
+                snapshot.update(
+                    (k, v) for k, v in full.items() if str(k).upper() in wanted)
         if direct:
             # No whole-market token for these (futures, and anything new).
             # Slow for a long list, but slow-and-correct beats fast-and-empty:
@@ -3336,7 +3555,7 @@ class BigQmtXtData:
         # or the result is all zeros.
         server_download_error = None
         try:
-            self.client.call(
+            download_reply = self.client.call(
                 "download_history_data2",
                 {
                     "stock_list": codes,
@@ -3346,6 +3565,14 @@ class BigQmtXtData:
                 },
                 timeout_seconds=float(download_timeout_seconds),
             )
+            if not download_reply:
+                # 服务端显式回 False = 下载任务没被受理（#339：恒 False 曾经
+                # 从这里漏过去，下面的空拉被当成「停牌/退市」容忍掉，最终报出
+                # finished==total 的假进度）。失败必须响（#47 契约）。
+                server_download_error = RuntimeError(
+                    "server reported download_history_data2 = %r: the terminal "
+                    "did not accept the download task (codes=%d period=%s)" % (
+                        download_reply, len(codes), period))
         except Exception as exc:
             # Best-effort only while the pull below can still save the
             # download (data already on the server). With the local cache
@@ -4468,7 +4695,7 @@ class BigQmtXtTrader:
         channel = None
         account_id = str(self.client.account_id or "")
         try:
-            channel = self._build_quote_push_channel()
+            channel = _build_quote_push_channel(self.client)
             channel.start_subscriber(topics, self._on_push_exec_event)
             self._event_ready.set()          # see the redis path (#247)
             while self._event_running:
@@ -4476,6 +4703,9 @@ class BigQmtXtTrader:
                     return       # account changed -> rebuild against the new address
                 time.sleep(0.5)
         except Exception:
+            # 静默重试养大了 #366（方法不存在 -> AttributeError -> 永远收不到
+            # 回调，外面什么都看不见）。失败必须留痕。
+            log.exception("exec event push-channel round failed; retrying")
             time.sleep(1.0)
         finally:
             if channel is not None:
@@ -4483,6 +4713,123 @@ class BigQmtXtTrader:
                     channel.stop()
                 except Exception:
                     pass
+
+    def _event_loop_poll(self):
+        """One poll-loop round: synthesize exec events by diffing queries (#372).
+
+        pipe / mysql 没有推送通道、redis 也不可达时，查询 RPC 仍然通——按
+        「服务端给副账号做的 #320 轮询」同一个模式，在客户端按 sysid+status
+        diff，合成与推送完全同形的 on_stock_order / on_stock_trade /
+        on_order_error。首轮只建状态不补发（已有委托不是「新事件」）；回调
+        延迟 = 轮询间隔（BIGQMT_EXEC_POLL_SECONDS，默认 1s）。查询连续失败
+        （比如 redis 传输的 redis 宕了）时退回外层重新选通道。
+        """
+        from .exec_events import normalize_order_error_event
+
+        interval = _env_float("BIGQMT_EXEC_POLL_SECONDS", 1.0)
+        account_id = str(self.client.account_id or "")
+        order_state = None    # sysid -> status；None = 还没打首轮底
+        seen_trades = set()
+        failures = 0
+        while self._event_running:
+            if str(self.client.account_id or "") != account_id:
+                return       # account changed -> outer loop re-selects
+            try:
+                orders = self.query_stock_orders(account_id) or []
+                trades = self.query_stock_trades(account_id) or []
+            except Exception as exc:
+                failures += 1
+                if failures == 1 or failures % 20 == 0:
+                    log.warning("exec poll round failed x%d: %s: %s",
+                                failures, exc.__class__.__name__, exc)
+                if failures >= 5:
+                    return   # 通道可能整体坏了（比如 redis 宕了）-> 外层重选
+                time.sleep(interval)
+                continue
+            failures = 0
+            if order_state is None:
+                # 首轮打底，不补发既有委托/成交。
+                order_state = {}
+                for order in orders:
+                    sysid = str(getattr(order, "order_sysid", "") or "")
+                    if sysid:
+                        order_state[sysid] = str(getattr(order, "order_status", "") or "")
+                for trade in trades:
+                    tid = str(getattr(trade, "trade_id", "") or "")
+                    if tid:
+                        seen_trades.add(tid)
+                self._event_ready.set()      # see the redis path (#247)
+                time.sleep(interval)
+                continue
+            for order in orders:
+                sysid = str(getattr(order, "order_sysid", "") or "")
+                if not sysid:
+                    continue
+                status = str(getattr(order, "order_status", "") or "")
+                prev = order_state.get(sysid)
+                order_state[sysid] = status
+                if prev == status:
+                    continue
+                event = {
+                    "event_type": "order",
+                    "account_id": account_id,
+                    "order_sys_id": sysid,
+                    "stock_code": str(getattr(order, "stock_code", "") or ""),
+                    "action": _action_of_row(order),
+                    "status": status,
+                    "price": getattr(order, "price", 0.0),
+                    "volume": getattr(order, "order_volume", getattr(order, "volume", 0)),
+                    "traded_volume": getattr(order, "traded_volume", 0),
+                    "order_remark": str(getattr(order, "order_remark", "") or ""),
+                    "strategy_name": str(getattr(order, "strategy_name", "") or ""),
+                    # 过 _order_from_dict 重算 order_type 需要的原生字段：
+                    # 信用判据（entrust/op/offset）一并带，和推送同形。
+                    "offset_flag": getattr(order, "offset_flag", None),
+                    "direction": getattr(order, "direction", None),
+                    "op_type": getattr(order, "op_type", None),
+                    "entrust_type": getattr(order, "entrust_type", None),
+                    "opt_name": getattr(order, "opt_name", ""),
+                    "source": "poll",
+                    "created_at_ts": time.time(),
+                }
+                try:
+                    self._dispatch_event(event)
+                except Exception:
+                    pass
+                if status == "57":
+                    # 废单/拒单同推 order_error（normalize 读的就是
+                    # m_strCancelInfo / status_msg 这一族字段）。
+                    try:
+                        self._dispatch_event(normalize_order_error_event(order, account_id))
+                    except Exception:
+                        pass
+            for trade in trades:
+                tid = str(getattr(trade, "trade_id", "") or "")
+                if not tid or tid in seen_trades:
+                    continue
+                seen_trades.add(tid)
+                event = {
+                    "event_type": "trade",
+                    "account_id": account_id,
+                    "trade_id": tid,
+                    "order_sys_id": str(getattr(trade, "order_sysid", "") or ""),
+                    "stock_code": str(getattr(trade, "stock_code", "") or ""),
+                    "action": _action_of_row(trade),
+                    "volume": getattr(trade, "traded_volume", getattr(trade, "volume", 0)),
+                    "price": getattr(trade, "traded_price", getattr(trade, "price", 0.0)),
+                    "offset_flag": getattr(trade, "offset_flag", None),
+                    "direction": getattr(trade, "direction", None),
+                    "op_type": getattr(trade, "op_type", None),
+                    "entrust_type": getattr(trade, "entrust_type", None),
+                    "opt_name": getattr(trade, "opt_name", ""),
+                    "source": "poll",
+                    "created_at_ts": time.time(),
+                }
+                try:
+                    self._dispatch_event(event)
+                except Exception:
+                    pass
+            time.sleep(interval)
 
     def _on_push_exec_event(self, topic, data):
         """Push-channel callback. The payload is already a decoded dict, unlike
@@ -4517,9 +4864,10 @@ class BigQmtXtTrader:
             elif self._exec_transport_is_zmq():
                 self._event_loop_push_channel()
             else:
-                # redis transport with redis down: nothing else carries
-                # events; keep retrying as before.
-                time.sleep(1.0)
+                # pipe / mysql 没有推送通道（redis 传输的 redis 宕了也是）——
+                # 查询 RPC 还通，就轮询合成回调（#372）；查询也连续失败时
+                # 它会自己退回来，外层重新探 redis。
+                self._event_loop_poll()
 
     def _exec_transport_is_zmq(self):
         return str(getattr(self.client, "transport_name", "redis") or "redis").lower() == "zmq"
@@ -4530,7 +4878,15 @@ class BigQmtXtTrader:
         _redis() only builds the client object; the connection is lazy, so
         an unreachable server would still return one. Ping it -- the channel
         choice must reflect reachability, not configuration.
+
+        非 redis 传输且没有显式 redis 配置时整步跳过（不建 client、不
+        ping）：pipe/mysql 客户端默认没有 redis 可连，照默认 127.0.0.1:6379
+        拨的那一下在外连即杀的沙箱里就是杀进程（2026-09-24 实盘核对）。
         """
+        transport_name = str(getattr(self.client, "transport_name", "redis") or "redis").lower()
+        if (transport_name not in ("redis", "", "default")
+                and not getattr(self.client, "_redis_explicit", True)):
+            return None
         try:
             client = self.client._redis()
             if client is None:
@@ -4629,7 +4985,10 @@ class BigQmtXtTrader:
                         error_msg=event.get("error_msg") or "",
                         order_sysid=_sysid,       # MiniQMT 规范名 (issue #65)
                         order_sys_id=_sysid,      # 兼容别名
-                        order_id=_sysid,
+                        # order_id 必须和 on_stock_order/order_stock 同型
+                        # (OrderId int 子类)，否则调用方拿到的废单号对不上
+                        # 下单返回值，也没法拿它撤单 (#363)。
+                        order_id=self._order_object_id(_sysid),
                         stock_code=event.get("stock_code") or "",
                         order_remark=str(
                             event.get("order_remark") or event.get("remark")
@@ -4650,7 +5009,7 @@ class BigQmtXtTrader:
                         error_msg=event.get("error_msg") or "",
                         order_sysid=_sysid,       # MiniQMT 规范名 (issue #65)
                         order_sys_id=_sysid,
-                        order_id=_sysid,
+                        order_id=self._order_object_id(_sysid),  # 同 #363
                         stock_code=event.get("stock_code") or "",
                         order_remark=str(
                             event.get("order_remark") or event.get("remark")
@@ -6617,7 +6976,8 @@ class BigQmtXtTrader:
         action = item.get("action")
         order_type = (option_order_type(item.get("direction"), item.get("offset_flag"), action)
                       if self._account_type_value(item) == 6 else _action_to_order_type(action))
-        order_type = _credit_order_type_from_op(item.get("op_type"), order_type)
+        # #330 跟修：entrust 判据优先，op 判据兜底
+        order_type = _credit_order_type_for_row(item, order_type)
         order_sysid = str(item.get("order_sys_id") or item.get("order_sysid") or item.get("order_id") or "")
         return CompatObject(
             account_id=account_id,
@@ -6665,7 +7025,7 @@ class BigQmtXtTrader:
         action = item.get("action")
         order_type = (option_order_type(item.get("direction"), item.get("offset_flag"), action)
                       if self._account_type_value(item) == 6 else _action_to_order_type(action))
-        order_type = _credit_order_type_from_op(item.get("op_type"), order_type)
+        order_type = _credit_order_type_for_row(item, order_type)
         order_sysid = str(item.get("order_sys_id") or item.get("order_sysid") or "")
         trade_id = str(item.get("trade_id") or "")
         traded_volume = _safe_int(item.get("volume", item.get("traded_volume")))

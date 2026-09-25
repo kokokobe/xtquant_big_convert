@@ -364,7 +364,9 @@ def build_quote_subscription_service(
     #315), so a secondary account's client gets the push on ITS channel."""
     if not enabled:
         return None
-    from .quote_push_channel import RedisQuotePushChannel, ZmqQuotePushChannel
+    from .quote_push_channel import (
+        NullQuotePushChannel, RedisQuotePushChannel, ZmqQuotePushChannel,
+    )
 
     source = ContextInfoQuoteSource(context_info)
     transport_name = str(transport_name or "redis").lower()
@@ -374,14 +376,11 @@ def build_quote_subscription_service(
         extra = [_default_quote_push_zmq_bind(other) for other in served if other != str(account_id or "")]
         channel = ZmqQuotePushChannel(bind_address=bind_address, extra_bind_addresses=extra)
         push_endpoint = bind_address
-    elif transport_name == "shm":
-        # 2026-09-15: shm (零 TCP，QMT 审计合规) 传输只有 RPC 线，行情推送是
-        # 另一条 wire。落到 RedisQuotePushChannel(redis_client=None) 的话，
-        # no-redis 部署会拿到一个 None 客户端 —— 订阅时才炸，还容易被当成
-        # "推送坏了" 而不是 "shm 没有推送通道"。这里显式声明不支持，让服务
-        # 整体退化为 None（start_publisher / reap_expired 都有 None 守卫）。
-        print("[quote_push] disabled: transport=shm has no push channel yet")
-        return None
+    elif redis_client is None:
+        # pipe（或 redis 被关掉的部署）没有推送线——静默空通道，而不是
+        # RedisQuotePushChannel(None) 每条事件一行 AttributeError。
+        channel = NullQuotePushChannel()
+        push_endpoint = ""
     else:
         channel = RedisQuotePushChannel(redis_client, account_id=account_id, account_ids=served)
         push_endpoint = ""

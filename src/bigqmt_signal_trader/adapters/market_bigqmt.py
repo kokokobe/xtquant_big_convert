@@ -656,11 +656,17 @@ def _load_native_xtdata():
 
 
 class BigQmtMarketDataProvider:
-    def __init__(self, context_info, native_xtdata=None, qmt_api=None):
+    def __init__(self, context_info, native_xtdata=None, qmt_api=None,
+                 native_xtdata_enabled=True):
         self.context_info = context_info
         # Allow injection for tests; otherwise resolve lazily on first use.
         self._native_xtdata = native_xtdata
         self.qmt_api = dict(qmt_api or {})
+        # pipe 这类沙箱传输的存在理由就是「禁 socket、外连即杀」的终端
+        # （2026-09-24 实盘）：原生 xtdata SDK 的调用会拨本地 58610 行情服务，
+        # 那种终端上一次 SDK 调用就死。关掉后 _native() 恒 None，所有 native
+        # 路径直接走既有回落。
+        self.native_xtdata_enabled = bool(native_xtdata_enabled)
 
     def _context_method(self, method_name):
         method = getattr(self.context_info, method_name, None)
@@ -670,6 +676,19 @@ class BigQmtMarketDataProvider:
 
     def _call_context(self, method_name, *args, **kwargs):
         return self._context_method(method_name)(*args, **kwargs)
+
+    def _call_global_first(self, method_name, *args, **kwargs):
+        """Prefer the QMT-injected runtime global; fall back to ContextInfo.
+
+        call_formula 一族的官方入口是注入策略命名空间的**全局函数**，完整
+        大 QMT 的 ContextInfo 上没有它们——只查 ContextInfo 就是
+        「ContextInfo.call_formula is not available」（#374）。和下载全局
+        同一个模式：注入了用注入的，没注入才看 ContextInfo。
+        """
+        func = self.qmt_api.get(method_name)
+        if callable(func):
+            return func(*args, **kwargs)
+        return self._call_context(method_name, *args, **kwargs)
 
     def _native(self):
         """Return the native xtdata SDK, resolving it lazily on first use.
@@ -681,6 +700,8 @@ class BigQmtMarketDataProvider:
         the SDK call itself to raise "无法连接行情服务" and fall back.
         """
         if self._native_xtdata is None:
+            if not self.native_xtdata_enabled:
+                return None
             self._native_xtdata = _load_native_xtdata()
         return self._native_xtdata
 
@@ -825,7 +846,18 @@ class BigQmtMarketDataProvider:
         big_kwargs_filled = dict(big_kwargs, fill_data=fill_data)
         positional_tail_filled = dict(positional_tail_kwargs, fill_data=fill_data)
 
-        return [
+        # subscribe 是 QMT 签名的最后一个参数（fill_data 之后）：True（大 QMT
+        # 默认）把查过的标的塞进常驻内存订阅池，批量拉分钟线时终端内存单调涨到
+        # 崩溃（#361）；False 只读本地已下载数据。和 fill_data 一样单独成
+        # shape、只在调用方给了才传——签名没有 subscribe 的终端 TypeError 后
+        # 仍落到下面的裸 shape。
+        subscribe = params.get("subscribe")
+        shapes = []
+        if subscribe is not None:
+            shapes.append(
+                (method_name, (), dict(big_kwargs_filled, subscribe=bool(subscribe))))
+
+        shapes.extend([
             (method_name, (), big_kwargs_filled),
             (method_name, (), big_kwargs),
             (method_name, (), mini_kwargs),
@@ -861,7 +893,8 @@ class BigQmtMarketDataProvider:
                     "fill_data": fill_data,
                 },
             ),
-        ]
+        ])
+        return shapes
 
     def _sector_codes(self, sector):
         """Cached sector listing. Membership does not change intraday and the
@@ -2136,7 +2169,7 @@ class BigQmtMarketDataProvider:
         return self._call_context("is_future", stock_code)
 
     def call_formula(self, formula_name, stock_code, period, start_time="", end_time="", count=-1, dividend_type=None, extend_param=None):
-        return self._call_context(
+        return self._call_global_first(
             "call_formula",
             formula_name,
             stock_code,
@@ -2149,7 +2182,7 @@ class BigQmtMarketDataProvider:
         )
 
     def subscribe_formula(self, formula_name, stock_code, period, start_time="", end_time="", count=-1, dividend_type=None, extend_param=None):
-        return self._call_context(
+        return self._call_global_first(
             "subscribe_formula",
             formula_name,
             stock_code,
@@ -2162,13 +2195,13 @@ class BigQmtMarketDataProvider:
         )
 
     def unsubscribe_formula(self, request_id):
-        return self._call_context("unsubscribe_formula", request_id)
+        return self._call_global_first("unsubscribe_formula", request_id)
 
     def get_formula_result(self, request_id, start_time="", end_time="", count=-1, timeout_second=-1):
-        return self._call_context("get_formula_result", request_id, start_time, end_time, count, timeout_second)
+        return self._call_global_first("get_formula_result", request_id, start_time, end_time, count, timeout_second)
 
     def gen_factor_index(self, data_name, formula_name, vars, sector_list, start_time="", end_time="", period="1d", dividend_type="none"):
-        return self._call_context(
+        return self._call_global_first(
             "gen_factor_index",
             data_name,
             formula_name,
