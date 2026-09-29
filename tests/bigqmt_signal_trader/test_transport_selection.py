@@ -46,7 +46,10 @@ class BackgroundThreadResolutionTest(unittest.TestCase):
     def test_shm_drain_override_now_stands(self):
         # shm 有了真正的 drain_request_queue（2026-09-15，mmap 环形缓冲 +
         # 内核事件），从"必须保留接收线程"名单毕业 —— 显式 False 生效。
-        self.assertTrue(_resolve_background_threads("shm", None))
+        # 上游 #343 之后 None 不再是历史默认 True：凡能 drain 的传输一律
+        # 进 adjust drain（实测 zmq+drain 88ms vs zmq+线程 490ms），显式
+        # True 仍然保留接收线程。
+        self.assertFalse(_resolve_background_threads("shm", None))
         self.assertFalse(_resolve_background_threads("shm", False))
         self.assertTrue(_resolve_background_threads("shm", True))
 

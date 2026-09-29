@@ -130,6 +130,20 @@ class ConfigBlockTest(unittest.TestCase):
 
 
 class EmbeddedContentTest(unittest.TestCase):
+    def test_generated_entries_use_authoritative_qmt_injected_function_list(self):
+        """The shell must not hand-copy the runtime injection list.
+
+        A stale tuple here omitted download_history_data, download_history_data2
+        and down_history_data even though the strategy declared all three.  The
+        generated bridge then read existing history but could not download a
+        missing row.
+        """
+        for kind in BUILDERS:
+            _path, source = build(kind)
+            self.assertIn(
+                "_strategy.capture_qmt_injected_funcs(globals())", source, kind)
+            self.assertNotIn("qmt_extra = {}", source, kind)
+
     def test_both_builds_embed_the_whole_package(self):
         sys.path.insert(0, TOOLS)
         import build_single_file

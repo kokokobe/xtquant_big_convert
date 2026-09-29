@@ -1,5 +1,26 @@
 # FormulaServer 直连快速路径（58600）
 
+## ⚠️ 模型交易面板审计雷（2026-09-23 实锤，先读这个）
+
+**只要模型交易面板里有策略在跑（模拟/实盘），外部客户端必须禁用本快速路径。**
+
+原理：本路径是外部 python 进程向 QMT 终端进程内的 FormulaServer（`127.0.0.1:58600`）
+发起回环 TCP 连接。QMT 的 `CStrategyTradeManager` 以 10s 节拍扫终端进程 TCP 表，这条
+入站连接的对端（客户端临时端口）不在白名单 → 记 `illegal IP` 并**同毫秒 stopAllStrategy
+杀掉面板全部策略**。2026-09-23 15:30 实锤：压测客户端连接被记
+`illegal IP: 127.0.0.1:60470`（60470=客户端临时端口），面板两座桥实例同停，手动重启恢复。
+长连接必被抓；短连接能否躲过节拍纯属运气，不要赌。
+
+关闭方式（二选一）：
+
+```python
+BIGQMT_FORMULA_SERVER_CONFIG = {"enabled": False}
+# 或环境变量 BIGQMT_FORMULA_ENABLED=0
+```
+
+关闭无正确性代价（被路由的 10 个方法自动回落 RPC，只是变慢）。要测 fastpath 数字，
+先停掉面板里的桥策略，或只在回测上下文跑（回测无 trade manager 不触发）。
+
 ## 这是什么
 
 大 QMT 的 `58600` 端口是 **FormulaServer** —— QMT 内置的 C++ 行情/参考数据服务。端口取自
@@ -131,7 +152,7 @@ c.request('getMarketData', {'fields': ['quoter'], 'stockCodes': ['000001.SZ'],
 
 ## 配置
 
-客户端侧，默认开启，通常不用写：
+客户端侧，默认开启，**面板跑桥时必须显式关闭（见顶部警告）**：
 
 ```python
 BIGQMT_FORMULA_SERVER_CONFIG = {

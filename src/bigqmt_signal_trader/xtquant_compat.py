@@ -3700,6 +3700,41 @@ class BigQmtXtData:
     def download_sector_data(self):
         return self._call("download_sector_data")
 
+    def get_money_flow(self, stock_code, start_time="", end_time=""):
+        return self._call(
+            "get_money_flow", stock_code=stock_code, start_time=start_time, end_time=end_time
+        )
+
+    def download_money_flow(self, stock_list, start_time="", end_time=""):
+        return self._call(
+            "download_money_flow",
+            stock_list=list(stock_list or []),
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+    def get_order_flow(self, stock_code, start_time="", end_time=""):
+        return self._call(
+            "get_order_flow", stock_code=stock_code, start_time=start_time, end_time=end_time
+        )
+
+    def download_order_flow(self, stock_list, start_time="", end_time=""):
+        return self._call(
+            "download_order_flow",
+            stock_list=list(stock_list or []),
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+    def get_lhb_data(self, start_time="", end_time=""):
+        return self._call("get_lhb_data", start_time=start_time, end_time=end_time)
+
+    def download_lhb_data(self, start_time="", end_time=""):
+        return self._call("download_lhb_data", start_time=start_time, end_time=end_time)
+
+    def get_north_south_calendar(self, start_time="", end_time=""):
+        return self._call("get_north_south_calendar", start_time=start_time, end_time=end_time)
+
     def download_cb_data(self):
         return self._call("download_cb_data")
 

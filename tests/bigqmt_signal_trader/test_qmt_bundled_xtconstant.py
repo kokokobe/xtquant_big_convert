@@ -78,6 +78,11 @@ def _server_side_modules():
             path = os.path.join(root, name)
             if os.path.relpath(path, SRC) in CLIENT_SIDE:
                 continue
+            if name == "BIGQMT_DRYRUN_NO_REDIS_FLAT_ALL_IN_ONE.py":
+                # 构建产物（gitignore），模板固定 #coding:gbk（QMT 编辑器约定），
+                # 与本仓库其余 .py 的 UTF-8 不同；内嵌的就是本目录下这些被扫的
+                # 模块本身，单独扫它没有增量覆盖。
+                continue
             yield path
 
 

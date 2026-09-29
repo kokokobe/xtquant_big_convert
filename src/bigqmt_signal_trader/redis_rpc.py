@@ -384,6 +384,14 @@ MARKET_DATA_METHODS = {
     "download_history_contracts",
     "download_index_weight",
     "download_sector_data",
+    # 资金流向 / 订单流向 / 龙虎榜 / 南北向（xtdata SDK 扩展 API）
+    "get_money_flow",
+    "download_money_flow",
+    "get_order_flow",
+    "download_order_flow",
+    "get_lhb_data",
+    "download_lhb_data",
+    "get_north_south_calendar",
     # 时间戳转换（纯计算，服务端本地）
     "datetime_to_timetag",
     "timetag_to_datetime",

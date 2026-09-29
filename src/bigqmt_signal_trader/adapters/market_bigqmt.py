@@ -2860,6 +2860,41 @@ class BigQmtMarketDataProvider:
                 pass
         return self._raise_unavailable("download_sector_data")
 
+    def get_money_flow(self, stock_code, start_time="", end_time=""):
+        def _via_context():
+            return self._call_context("get_money_flow", stock_code, start_time, end_time)
+        return self._native_or_context("get_money_flow", _via_context, stock_code, start_time, end_time)
+
+    def download_money_flow(self, stock_list, start_time="", end_time=""):
+        def _via_context():
+            return self._call_context("download_money_flow", stock_list, start_time, end_time)
+        return self._native_or_context("download_money_flow", _via_context, stock_list, start_time, end_time)
+
+    def get_order_flow(self, stock_code, start_time="", end_time=""):
+        def _via_context():
+            return self._call_context("get_order_flow", stock_code, start_time, end_time)
+        return self._native_or_context("get_order_flow", _via_context, stock_code, start_time, end_time)
+
+    def download_order_flow(self, stock_list, start_time="", end_time=""):
+        def _via_context():
+            return self._call_context("download_order_flow", stock_list, start_time, end_time)
+        return self._native_or_context("download_order_flow", _via_context, stock_list, start_time, end_time)
+
+    def get_lhb_data(self, start_time="", end_time=""):
+        def _via_context():
+            return self._call_context("get_lhb_data", start_time, end_time)
+        return self._native_or_context("get_lhb_data", _via_context, start_time, end_time)
+
+    def download_lhb_data(self, start_time="", end_time=""):
+        def _via_context():
+            return self._call_context("download_lhb_data", start_time, end_time)
+        return self._native_or_context("download_lhb_data", _via_context, start_time, end_time)
+
+    def get_north_south_calendar(self, start_time="", end_time=""):
+        def _via_context():
+            return self._call_context("get_north_south_calendar", start_time, end_time)
+        return self._native_or_context("get_north_south_calendar", _via_context, start_time, end_time)
+
     # ------------------------------------------------------------------
     # 时间戳转换（纯计算，无需 QMT，服务端本地实现）
     # ------------------------------------------------------------------

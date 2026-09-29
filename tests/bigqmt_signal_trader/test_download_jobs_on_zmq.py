@@ -154,13 +154,11 @@ class HandlerTest(unittest.TestCase):
         self.assertIs(self._handlers(redis_client)._download_job_redis(), redis_client)
 
     def test_no_redis_at_all_still_says_so_plainly(self):
-        """A deployment with no redis configured has no job store, and saying
-        that is right -- what was wrong was saying it on zmq deployments that
-        did have one."""
-        with self.assertRaises(RuntimeError) as caught:
-            self._handlers(None)._download_job_redis()
-
-        self.assertIn("require a Redis client", str(caught.exception))
+        """A deployment with no redis configured falls back to the in-memory
+        job registry (2026-09-16: submit and execute live in the same process,
+        no cross-process visibility needed) -- _download_job_redis hands back
+        None and the memory-mode path takes over. See test_download_jobs."""
+        self.assertIsNone(self._handlers(None)._download_job_redis())
 
     def test_the_three_download_methods_all_go_through_it(self):
         source = inspect.getsource(BigQmtRpcHandlers)

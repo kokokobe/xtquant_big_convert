@@ -253,6 +253,47 @@ class ConcurrencyTest(unittest.TestCase):
 
 
 @WINDOWS_ONLY
+class WireInitRaceTest(unittest.TestCase):
+    """共享请求线必须一次性建好再发布。
+
+    曾经的懒初始化是 `_req_ring` 先发布、`_req_mutex` 后赋值，而别的线程
+    以 `_req_ring is None` 当初始化判据 —— 20 线程同时首发请求时，后来的
+    线程会在两行之间跳过初始化，拿到 `_req_mutex=None`，对 NULL 句柄
+    WaitForSingleObject 立即 WAIT_FAILED(0xFFFFFFFF)。实锤诊断：
+    last_error=6 (ERROR_INVALID_HANDLE)，handle=None。
+    """
+
+    def test_concurrent_first_requests_never_see_a_half_built_wire(self):
+        transport = SharedMemoryTransport(account_id=_uniq("race"))
+        self.addCleanup(transport.stop)
+        orig_open_mutex = transport._open_mutex
+
+        def slow_open_mutex(name):
+            time.sleep(0.2)   # 拉大「ring 已发布、mutex 未发布」的窗口
+            return orig_open_mutex(name)
+
+        transport._open_mutex = slow_open_mutex
+
+        results = []
+
+        def enter():
+            try:
+                transport._thread_wire()
+                results.append(("ok", transport._req_mutex, transport._req_event))
+            except Exception as exc:      # pragma: no cover - 诊断信息
+                results.append(("exc", repr(exc), None))
+
+        threads = [threading.Thread(target=enter) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        bad = [r for r in results if r[0] != "ok" or r[1] is None or r[2] is None]
+        self.assertEqual(bad, [])
+        self.assertIsNotNone(transport._req_ring)
+
+
+@WINDOWS_ONLY
 class DrainModeTest(unittest.TestCase):
     """drain 模式：adjust 线程自己非阻塞轮询，不起工作线程。"""
 
@@ -363,7 +404,7 @@ class FrameLimitTest(unittest.TestCase):
             # genuinely cannot fit the reply slot -- this must surface as an
             # error envelope, not a silent drop or a truncated payload.
             out["data"] = {"blob": base64.b64encode(
-                os.urandom(5 * 1024 * 1024)).decode("ascii")}
+                os.urandom(101 * 1024 * 1024)).decode("ascii")}
             return out
 
         srv._on_request = huge

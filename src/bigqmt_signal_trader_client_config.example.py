@@ -84,7 +84,10 @@ BIGQMT_LOCAL_CACHE_CONFIG = {
 #   RPC. Every miss — unmapped method, untranslatable params, server down —
 #   falls back to RPC automatically, so an unreachable 58600 changes nothing.
 BIGQMT_FORMULA_SERVER_CONFIG = {
-    "enabled": True,        # or set BIGQMT_FORMULA_ENABLED=0 in the environment
+    # ⚠️ 默认 False（2026-09-23）：这条直连是回环 TCP，模型交易面板运行期间
+    # 会被终端审计记非法IP并全面板杀策略（实锤 illegal IP: 127.0.0.1:60470）。
+    # 仅当面板里没有运行中的桥策略时才改 True 测速。
+    "enabled": False,       # or set BIGQMT_FORMULA_ENABLED=0 in the environment
     # "host": "127.0.0.1",  # FormulaServer binds 0.0.0.0, so cross-machine works
     #                       # if the firewall allows it
     # "port": 58600,        # unset -> read from qmt_root's formulaserver.ini,

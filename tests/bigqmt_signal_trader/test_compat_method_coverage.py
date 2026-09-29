@@ -40,6 +40,20 @@ from bigqmt_signal_trader.xtquant_compat import BigQmtXtData, BigQmtXtTrader
 # 于是显式报错」的），清单只留真正没人按名字承诺过的。
 CALL_METHOD_ONLY = frozenset({
     "get_ETF_list",
+    # ContextInfo 独有方法补全（2026-09-16 穷举探针实锤终端存在而桥未暴露，
+    # 白名单由本地提交加入）。MiniQMT 的 xtdata 没有这些方法，走 call_method。
+    "get_finance",
+    "get_largecap",
+    "get_midcap",
+    "get_scale_and_rank",
+    "get_scale_and_stock",
+    "get_smallcap",
+    "get_universe",
+    "is_fund",
+    "is_future",
+    "is_stock",
+    "is_suspended_stock",
+    "stockcode_in_rzrk",
 })
 
 

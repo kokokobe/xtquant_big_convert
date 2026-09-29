@@ -349,6 +349,10 @@ class ClientOnlyImportBoundaryTest(unittest.TestCase):
             for filename in filenames:
                 if not filename.endswith(".py"):
                     continue
+                if filename == "BIGQMT_DRYRUN_NO_REDIS_FLAT_ALL_IN_ONE.py":
+                    # 构建产物（gitignore），#coding:gbk，非 UTF-8；内嵌的是
+                    # 本目录下这些被扫模块本身，无增量覆盖。
+                    continue
                 path = os.path.join(directory, filename)
                 relative = os.path.relpath(path, src)
                 if relative in client_only or "xtquant" in relative.split(os.sep):

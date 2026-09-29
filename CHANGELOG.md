@@ -3,6 +3,24 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
+## [0.3.62] - 2026-09-27
+
+### 变更
+
+- **SHM 应答环 LRU 淘汰**。`SharedMemoryTransport` 服务端将打开的 reply ring
+  上限设为 8 个，超限时关闭最久未用的 100MB section。此前仅在 `stop()` 时释放，
+  多次回填 / 重连导致 QMT 进程积累数百 MB 页文件映射。
+- **客户端显式释放 reply wire**。新增 `close_client_wire()`，批量请求完成后
+  立即释放本线程的 100MB reply section，而非等待 GC / 进程退出。
+
+## [0.3.61] - 2026-09-27
+
+### 变更
+
+- **SHM 应答槽扩容到 100MB**。SHM wire geometry 从 v1 升到 v2（REQ 64×64KB，RSP 1×100MB），
+  避免 10 年批量日线回填触发 `shm frame too large: ... > 4MB`。两端必须同时部署本版本；
+  桥重启前旧 v1 共享段不能与新客户端复用。
+
 ## [0.3.60] - 2026-09-24
 
 ### 修复

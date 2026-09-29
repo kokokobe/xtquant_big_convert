@@ -533,8 +533,14 @@ def capture_qmt_injected_funcs(namespace):
     so a plain import namespace binds nothing.
     """
     captured = {}
+    builtins_ns = getattr(namespace or {}, "__builtins__", None)
+    if not isinstance(builtins_ns, dict):
+        import builtins as _builtins
+        builtins_ns = vars(_builtins)
     for name in _QMT_INJECTED_GLOBAL_FUNCS:
         func = (namespace or {}).get(name)
+        if not callable(func):
+            func = builtins_ns.get(name)
         if callable(func):
             captured[name] = func
     return captured

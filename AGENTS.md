@@ -93,7 +93,7 @@ signaler 回环自连；`Context.instance()` 不随策略停止回收，留僵�
   **每线程私有应答线**（#186 shm 版：共享环会被在途请求互相覆盖）
 - 线格式协议 v1：header 64B（`BQSH`/version/slot_count/slot_size/write_seq/lost）
   + slot（seq 8B + request_id 32B + len/flags + payload）。**几何是协议常量，不吃配置**
-  ——REQ 64×64KB，RSP 4×4MB；改尺寸必须升 version
+  ——REQ 64×64KB，RSP 1×100MB（v2）；改几何必须升 version
 - 回复路由：`request["reply_shm"]/["reply_evt"]` 随信封走（shm 版 ROUTER identity）
 - 双模式：`background_threads=True` 监听线程等事件（推送 0.0ms）；`=False` 纯 drain
   （adjust 每 tick 非阻塞拉序号，**无线程**）——本机部署用 drain 模式

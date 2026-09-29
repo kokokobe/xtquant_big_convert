@@ -1,6 +1,9 @@
 #encoding:utf-8
 r"""MARKET_DATA_METHODS 逐方法快扫: ping 探空 -> 20s 实弹 -> 归因。
 每个方法测之前先 ping 到桥空闲（上一轮慢 handler 释放），保证超时归因到方法本身。
+超时方法自动等管线排空后重测一次——共享实盘账户的跨终端争抢会把健康方法
+一起拖进超时窗口（2026-09-22 实测 48/102 TIMEOUT 重测全部秒回），重测通过
+的标 RECOVERED 改判环境争抢，重测仍超时才算真·原生慢。
 结果增量写 tools/market_data_sweep_report.txt + 最终 JSON 汇总。
 """
 import json
@@ -66,29 +69,45 @@ def main():
                 summary[name] = "GATE_FAIL(队列未排空)"
                 emit("  {:<36} GATE-FAIL".format(name))
                 continue
+            tag = ""
             try:
                 r = call(client, name, PER_CALL)
             except Exception as exc:
-                summary[name] = "TIMEOUT(%s)" % type(exc).__name__
-                emit("  {:<36} TIMEOUT      自身慢/原生依赖".format(name))
-                continue
+                # 超时≠方法慢：共享实盘账户的跨终端争抢会把健康方法一起拖进
+                # 超时窗口（2026-09-22 实测：48 个 TIMEOUT 空参重测全部 15ms
+                # 秒回，连纯 Python 的 bsm_price 也在内）。等管线排空后重测
+                # 一次，能恢复的改判为环境争抢，只有重测仍超时才算原生慢。
+                if not ping_gate(client):
+                    summary[name] = "TIMEOUT(重测前桥无响应:%s)" % type(exc).__name__
+                    emit("  {:<36} TIMEOUT      重测前 ping 无响应".format(name))
+                    continue
+                try:
+                    r = call(client, name, PER_CALL)
+                except Exception as exc2:
+                    summary[name] = "TIMEOUT(%s)" % type(exc2).__name__
+                    emit("  {:<36} TIMEOUT      重测仍超时,真·原生慢/依赖".format(name))
+                    continue
+                tag = "RECOVERED "
+                emit("  {:<36} 首测超时,重测通过 -> 环境争抢误报".format(name))
             if r.get("ok"):
                 d = json.dumps(r.get("data"), default=str)
-                summary[name] = "PASS(%dB)" % len(d)
-                emit("  {:<36} PASS         {}B".format(name, len(d)))
+                summary[name] = "PASS%s(%dB)" % ("+RECOVERED" if tag else "", len(d))
+                emit("  {:<36} {}PASS         {}B".format(name, tag, len(d)))
             else:
                 err = str(r.get("error") or "")[:70]
-                summary[name] = "REACHABLE(%s)" % err
-                emit("  {:<36} REACHABLE    {}".format(name, err.encode("gbk", "replace").decode("gbk")))
+                summary[name] = "REACHABLE%s(%s)" % ("+RECOVERED" if tag else "", err)
+                emit("  {:<36} {}REACHABLE    {}".format(name, tag, err.encode("gbk", "replace").decode("gbk")))
     finally:
         client.stop()
     emit("---- 汇总 ----")
     n_pass = sum(1 for v in summary.values() if v.startswith("PASS"))
     n_reach = sum(1 for v in summary.values() if v.startswith("REACHABLE"))
+    n_recover = sum(1 for v in summary.values() if "RECOVERED" in v)
     n_slow = sum(1 for v in summary.values() if v.startswith("TIMEOUT"))
     n_gate = sum(1 for v in summary.values() if v.startswith("GATE"))
-    emit("PASS=%d REACHABLE=%d TIMEOUT(原生慢族)=%d GATE_FAIL=%d / %d"
-         % (n_pass, n_reach, n_slow, n_gate, len(methods)))
+    emit("PASS=%d REACHABLE=%d TIMEOUT(重测仍超时,真·原生慢)=%d "
+         "其中环境争抢误报=%d GATE_FAIL=%d / %d"
+         % (n_pass, n_reach, n_slow, n_recover, n_gate, len(methods)))
     with open(REPORT + ".json", "w", encoding="utf-8") as jf:
         json.dump(summary, jf, ensure_ascii=False, indent=1)
     emit("DONE")

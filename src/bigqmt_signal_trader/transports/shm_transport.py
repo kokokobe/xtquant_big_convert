@@ -34,7 +34,7 @@ Topology (mirrors ZmqTransport's ROUTER/DEALER split)
   (``reply_shm`` / ``reply_evt`` -- the shm analogue of the zmq ROUTER
   identity). ``send_response`` writes into the caller's ring and signals.
 
-Wire layout (protocol version 1; geometry is protocol-fixed, not config, so
+Wire layout (protocol version 2; geometry is protocol-fixed, not config, so
 two ends with drifting config files can never disagree about a section size):
 
     section header (64 bytes)
@@ -77,18 +77,18 @@ from ..redis_rpc import (
     encode_rpc_request_payload,
 )
 
-# -- protocol constants (version 1 geometry; do not resize without a bump) ----
+# -- protocol constants (version 2 geometry; do not resize without a bump) ----
 _HDR_BYTES = 64
 _MAGIC = b"BQSH"
-_VERSION = 1
+_VERSION = 2
 _SLOT_HDR_BYTES = 48          # seq(8) + request_id(32) + length(4) + flags(4)
 # Header struct: magic(4) version(4) slot_count(4) slot_size(4) write_seq(8)
 # lost(4) -- offsets 0/4/8/12/16/24, exactly as documented above.
 _HDR_FMT = "<4sIIIQI"
 _REQ_SLOT_COUNT = 64
 _REQ_SLOT_BYTES = 64 * 1024   # requests are small envelopes
-_RSP_SLOT_COUNT = 4
-_RSP_SLOT_BYTES = 4 * 1024 * 1024   # replies may carry whole-market snapshots
+_RSP_SLOT_COUNT = 1
+_RSP_SLOT_BYTES = 100 * 1024 * 1024  # replies may carry whole-market snapshots
 
 _REQ_TOTAL = _HDR_BYTES + _REQ_SLOT_COUNT * _REQ_SLOT_BYTES
 _RSP_TOTAL = _HDR_BYTES + _RSP_SLOT_COUNT * _RSP_SLOT_BYTES
@@ -96,6 +96,7 @@ _RSP_TOTAL = _HDR_BYTES + _RSP_SLOT_COUNT * _RSP_SLOT_BYTES
 _FLAG_ZLIB = 0x1
 _ZLIB_MIN_BYTES = 16 * 1024
 _DEFAULT_PREFIX = "bigqmt_shm"
+_MAX_OPEN_REPLY_RINGS = 8
 
 _WAIT_OBJECT_0 = 0
 _WAIT_TIMEOUT = 0x00000102
@@ -271,6 +272,8 @@ class SharedMemoryTransport(RpcTransport):
         self._req_ring = None
         self._req_event = None
         self._req_mutex = None
+        # 共享请求线懒初始化锁 —— ring/mutex/event 必须作为一组原子发布
+        self._req_init_lock = threading.Lock()
         self._listener_thread = None
         self._server_seq_cursor = 0
         # reply wires opened on demand by send_response, keyed by section name
@@ -278,6 +281,7 @@ class SharedMemoryTransport(RpcTransport):
         self._reply_rings = {}
         self._reply_events = {}
         self._reply_seq = {}
+        self._reply_last_used = {}
         # client state. One reply wire per calling thread (#186's shm answer):
         # a shared ring would let 20 in-flight requests overwrite each other's
         # replies in a 4-slot ring before the slow thread ever scans it. Each
@@ -330,7 +334,7 @@ class SharedMemoryTransport(RpcTransport):
             response[TYPED_PAYLOAD_FLAG] = TYPED_PAYLOAD_MARKER in text
         return response
 
-    # -- server side -------------------------------------------------------
+        # -- server side -------------------------------------------------------
     def start_receiving(self, on_request, background_threads=True):
         super(SharedMemoryTransport, self).start_receiving(on_request)
         self._req_ring = _Ring(
@@ -443,6 +447,9 @@ class SharedMemoryTransport(RpcTransport):
         event_name = str((request or {}).get("reply_evt") or "")
         if not section or not event_name:
             return    # client predates reply routing -- nothing to answer into
+        with self._reply_lock:
+            self._reply_last_used[section] = time.time()
+            self._evict_stale_reply_rings()
         ring = self._reply_rings.get(section)
         if ring is None:
             try:
@@ -474,6 +481,27 @@ class SharedMemoryTransport(RpcTransport):
                 section, self._open_event(event_name))
         self._dll().SetEvent(self._reply_events[section])
 
+    def _evict_stale_reply_rings(self):
+        """Close the oldest open reply rings when the cache exceeds its cap."""
+        while len(self._reply_rings) > _MAX_OPEN_REPLY_RINGS:
+            oldest = min(self._reply_last_used,
+                         key=lambda k: self._reply_last_used.get(k, 0))
+            if oldest not in self._reply_rings:
+                self._reply_last_used.pop(oldest, None)
+                continue
+            ring = self._reply_rings.pop(oldest)
+            ring.close()
+            self._reply_seq.pop(oldest, None)
+            handle = self._reply_events.pop(oldest, None)
+            if handle:
+                try:
+                    self._dll().CloseHandle(handle)
+                except Exception:
+                    pass
+            self._reply_last_used.pop(oldest, None)
+            print("%s shm reply ring evicted (LRU cap %d): %s"
+                  % (self.print_prefix, _MAX_OPEN_REPLY_RINGS, oldest))
+
     # -- client side -------------------------------------------------------
     def _thread_wire(self):
         """This thread's reply wire, created on first use (zmq DEALER shape)."""
@@ -482,10 +510,21 @@ class SharedMemoryTransport(RpcTransport):
             state = self._new_client_wire()
             self._client_local.state = state
         if self._req_ring is None:
-            self._req_ring = _Ring(
-                self._req_section_name, _REQ_TOTAL, _REQ_SLOT_COUNT, _REQ_SLOT_BYTES)
-            self._req_mutex = self._open_mutex(self._req_mutex_name)
-            self._req_event = self._open_event(self._req_event_name)
+            # 双重检查锁：判据是 _req_ring，但它必须最后发布。曾经的写法是
+            # ring 先赋值、mutex 后赋值 —— 20 线程同时首发请求时，别的线程
+            # 在两行之间跳过初始化拿到 _req_mutex=None，对 NULL 句柄
+            # WaitForSingleObject 立即 WAIT_FAILED(0xFFFFFFFF)/last_error=6
+            # （test_shm_transport 并发偶发失败的根因，2026-09-22 诊断实锤）。
+            with self._req_init_lock:
+                if self._req_ring is None:
+                    ring = _Ring(
+                        self._req_section_name, _REQ_TOTAL, _REQ_SLOT_COUNT,
+                        _REQ_SLOT_BYTES)
+                    mutex = self._open_mutex(self._req_mutex_name)
+                    event = self._open_event(self._req_event_name)
+                    self._req_mutex = mutex
+                    self._req_event = event
+                    self._req_ring = ring   # 判据，最后发布
         return state
 
     def send_request(self, request, timeout_seconds, **_kwargs):
@@ -543,6 +582,23 @@ class SharedMemoryTransport(RpcTransport):
             if time.time() >= deadline:
                 raise TransportTimeout("shm rpc timeout: %s" % request.get("method"))
 
+    def close_client_wire(self):
+        """Release this thread's 100 MB reply section immediately.
+
+        Call after a batch of requests is done so the OS can reclaim the
+        pagefile-backed mapping instead of waiting for GC / process exit.
+        """
+        state = getattr(self._client_local, "state", None)
+        if state is not None:
+            state["ring"].close()
+            event = state.get("event")
+            if event:
+                try:
+                    self._dll().CloseHandle(event)
+                except Exception:
+                    pass
+            self._client_local.state = None
+
     # -- lifecycle ---------------------------------------------------------
     def stop(self):
         super(SharedMemoryTransport, self).stop()
@@ -560,6 +616,7 @@ class SharedMemoryTransport(RpcTransport):
             for ring in self._reply_rings.values():
                 ring.close()
             self._reply_rings = {}
+            self._reply_last_used = {}
         for handle in (self._req_event, self._req_mutex):
             if handle:
                 try:
