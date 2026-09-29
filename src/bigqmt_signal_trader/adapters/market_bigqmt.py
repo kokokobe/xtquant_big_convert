@@ -1236,6 +1236,15 @@ class BigQmtMarketDataProvider:
         data = self._call_first_supported(shapes)
         return data or []
 
+    def get_sector(self, sector_name, real_timetag=-1):
+        """ContextInfo.get_sector(indexCode[, realTimetag]): 指数成分股。"""
+        shapes = [
+            ("get_sector", (sector_name, real_timetag), {}),
+            ("get_sector", (sector_name,), {}),
+        ]
+        data = self._call_first_supported(shapes)
+        return data or []
+
     def get_market_data(
         self,
         field_list=None,
@@ -1515,6 +1524,17 @@ class BigQmtMarketDataProvider:
         if hasattr(self.context_info, "get_market_data"):
             shapes.extend(self._market_data_shapes("get_market_data", **kwargs))
         return self._call_first_supported(shapes)
+
+    def get_market_data_ex_ori(self, **kwargs):
+        """Explicit ContextInfo.get_market_data_ex_ori read, without fallback."""
+        raw_data = self._call_first_supported(
+            self._market_data_shapes("get_market_data_ex_ori", **kwargs)
+        )
+        return _raw_market_data_payload(
+            raw_data,
+            kwargs.get("field_list") or kwargs.get("fields"),
+            kwargs.get("stock_list") or kwargs.get("stock_code"),
+        )
 
     def _local_bar_shapes(self, **kwargs):
         """Call shapes for "read bars without going through get_market_data2".
@@ -1849,20 +1869,28 @@ class BigQmtMarketDataProvider:
     def get_his_option_list_batch(self, undl_code, start_time="", end_time=""):
         return self._call_context("get_his_option_list_batch", undl_code, start_time, end_time)
 
-    def get_financial_data(self, stock_list, table_list=None, start_time="", end_time="", report_type="report_time"):
+    def get_financial_data(
+        self, stock_list, table_list=None, start_time="", end_time="",
+        report_type="report_time", pos=None,
+    ):
         # ContextInfo stub signature: get_financial_data(fieldList, stockList, startDate, endDate, report_type)
         # — fieldList (table_list) comes FIRST, stockList SECOND. Our public API keeps
         # the xtdata order (stock_list, table_list) so callers don't change, but we
         # must swap when forwarding to ContextInfo.
         # Big QMT also wants dotted "BIGTABLE.field" entries, not MiniQMT table
         # names — translate whole-table names to the full field list (issue #52).
+        fields = _translate_financial_fields(table_list)
+        if pos is None:
+            return self._call_context(
+                "get_financial_data", fields, stock_list, start_time, end_time,
+                report_type,
+            )
+        # pos is in the shipped _PyContextInfo stub. Do not silently drop it on
+        # older builds: a caller asking for a historical report vintage must not
+        # receive the latest row and read it as that vintage.
         return self._call_context(
-            "get_financial_data",
-            _translate_financial_fields(table_list),
-            stock_list,
-            start_time,
-            end_time,
-            report_type,
+            "get_financial_data", fields, stock_list, start_time, end_time,
+            report_type, pos,
         )
 
     def download_financial_data(self, stock_list, table_list=None, start_time="", end_time="", incrementally=None):

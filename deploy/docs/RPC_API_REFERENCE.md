@@ -114,6 +114,7 @@
 |------|------|------|
 | `get_market_data` | `field_list`(list) `stock_list`(list) `period`("1d"/"1m"/"5m"/"tick") `start_time` `end_time` `count`(int) `dividend_type`("none"/"front"/"back") `fill_data`(bool) | DataFrame（自动还原）|
 | `get_market_data_ex` | 同上 | `dict[code -> DataFrame]` |
+| `get_market_data_ex_ori` | 同上 | `dict[code -> DataFrame]`；按名访问 ContextInfo 原始接口，用于诊断新老接口差异 |
 | `get_local_data` | 同上 + 可选 `data_dir` | `dict[code -> DataFrame]` |
 
 > DataFrame / Series 在 RPC 协议层用 `__bigqmt_type__` 标记序列化，客户端 `xtquant_compat` 自动还原为 pandas 对象。
@@ -163,6 +164,7 @@ FormulaServer 直连不认这个参数，带上它会强制回落到 RPC 桥（�
 | 方法 | 参数 | 返回 | Big QMT 实现说明 |
 |------|------|------|----------------|
 | `get_stock_list_in_sector` | `sector_name`(str) 可选 `real_timetag`(int,默认-1) | `list[str]` 代码列表 | `ContextInfo.get_stock_list_in_sector` |
+| `get_sector` | `sector_name`(str) 可选 `real_timetag`(int,默认-1) | `list[str]` 指数成分股；入参是指数代码，不是板块名 | `ContextInfo.get_sector` |
 | `get_sector_list` | 无 | `list[str]` 板块名 | ⚠️ 见下方说明 |
 | `get_sector_info` | `sector_name`(str) | 板块详情 | `ContextInfo.get_sector_info` |
 
@@ -205,6 +207,7 @@ FormulaServer 直连不认这个参数，带上它会强制回落到 RPC 桥（�
 | 方法 | 参数 | 说明 |
 |------|------|------|
 | `get_financial_data` | `stock_list`(list) `table_list`(list) `start_time` `end_time` `report_type`("report_time") | 财务数据 |
+| `get_financial_data`（含 `pos`） | 同上 + 可选 `pos`(int)；`pos` 对齐官方 `_PyContextInfo` 桩 | 财务数据；老终端不支持显式 `pos` 时会报 TypeError，不静默读最新报告 |
 | `download_financial_data` | 同上 + `incrementally` | 下载财务 |
 | `download_financial_data2` | `stock_list` `table_list` `start_time` `end_time` | 批量下载财务 |
 | `get_etf_info` | 无 | ETF 信息 |
