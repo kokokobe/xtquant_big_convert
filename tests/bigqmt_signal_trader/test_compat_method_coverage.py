@@ -27,6 +27,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from bigqmt_signal_trader.redis_rpc import MARKET_DATA_METHODS
+from bigqmt_signal_trader.adapters.market_bigqmt import BigQmtMarketDataProvider
 from bigqmt_signal_trader.xtquant_compat import BigQmtXtData, BigQmtXtTrader
 
 
@@ -170,6 +171,64 @@ class L2ThousandWrapperTest(unittest.TestCase):
             self.data.calls,
             [("subscribe_l2thousand", {"stock_code": "600000.SH", "gear_num": 0})])
 
+
+class ContextInfoStubGapTest(unittest.TestCase):
+    """_PyContextInfo 里有、桥之前没有按名暴露的数据面方法。"""
+
+    def test_data_methods_are_whitelisted_and_wrapped(self):
+        for name in ("get_sector", "get_market_data_ex_ori"):
+            self.assertIn(name, MARKET_DATA_METHODS, name)
+            self.assertTrue(hasattr(BigQmtXtData, name), name)
+
+    def test_get_sector_forwards_the_official_stub_signature(self):
+        data = _Recorder()
+        self.assertEqual(data.get_sector("000300.SH", 12), "ok")
+        self.assertEqual(
+            data.calls,
+            [("get_sector",
+              {"sector_name": "000300.SH", "real_timetag": 12})])
+
+    def test_get_sector_defaults_real_timetag_like_contextinfo(self):
+        data = _Recorder()
+        data.get_sector("000300.SH")
+        self.assertEqual(
+            data.calls,
+            [("get_sector",
+              {"sector_name": "000300.SH", "real_timetag": -1})])
+
+    def test_get_market_data_ex_ori_forwards_bar_parameters(self):
+        data = _Recorder()
+        params = {
+            "field_list": ["close"], "stock_list": ["600000.SH"],
+            "period": "1d", "start_time": "20240101",
+            "end_time": "20240131", "count": -1,
+            "dividend_type": "none", "fill_data": False,
+        }
+        data.get_market_data_ex_ori(**params)
+        self.assertEqual(data.calls, [("get_market_data_ex_ori", params)])
+
+    def test_get_financial_data_keeps_the_official_pos_parameter(self):
+        data = _Recorder()
+        data.get_financial_data(
+            ["600000.SH"], ["ASHAREINCOME.revenue"],
+            "20240101", "20241231", "report_time", pos=2,
+        )
+        self.assertEqual(
+            data.calls,
+            [("get_financial_data", {
+                "stock_list": ["600000.SH"],
+                "table_list": ["ASHAREINCOME.revenue"],
+                "start_time": "20240101",
+                "end_time": "20241231",
+                "report_type": "report_time",
+                "pos": 2,
+            })])
+
+
+class L2ThousandCallbackTest(unittest.TestCase):
+    def setUp(self):
+        self.data = _Recorder()
+
     def test_callback_is_accepted_but_not_forwarded(self):
         # RPC 模型下没有回调通道，服务端也会忽略；要推送用 subscribe_whole_quote
         self.data.subscribe_l2thousand("600000.SH", gear_num=5, callback=lambda d: None)
@@ -177,6 +236,58 @@ class L2ThousandWrapperTest(unittest.TestCase):
             self.data.calls,
             [("subscribe_l2thousand", {"stock_code": "600000.SH", "gear_num": 5})])
 
+
+class ContextInfoServerStubGapTest(unittest.TestCase):
+    class _Context:
+        def __init__(self):
+            self.calls = []
+
+        def get_sector(self, *args):
+            self.calls.append(("get_sector", args))
+            return ["600000.SH"]
+
+        def get_financial_data(self, *args):
+            self.calls.append(("get_financial_data", args))
+            return {"600000.SH": {}}
+
+    def setUp(self):
+        self.context = self._Context()
+        self.provider = BigQmtMarketDataProvider(self.context)
+
+    def test_get_sector_prefers_the_two_argument_context_shape(self):
+        self.assertEqual(self.provider.get_sector("000300.SH", 12), ["600000.SH"])
+        self.assertEqual(
+            self.context.calls,
+            [("get_sector", ("000300.SH", 12))])
+
+    def test_get_sector_falls_back_to_the_one_argument_shape(self):
+        class _OldContext(self._Context):
+            def get_sector(self, sector_name):
+                self.calls.append(("get_sector", (sector_name,)))
+                return ["000001.SZ"]
+
+        provider = BigQmtMarketDataProvider(_OldContext())
+        self.assertEqual(provider.get_sector("000300.SH"), ["000001.SZ"])
+        self.assertEqual(
+            provider.context_info.calls,
+            [("get_sector", ("000300.SH",))])
+
+    def test_financial_data_adds_pos_only_when_requested(self):
+        fields = ["ASHAREINCOME.revenue"]
+        stocks = ["600000.SH"]
+        self.provider.get_financial_data(
+            stocks, fields, "20240101", "20241231", "report_time", pos=2)
+        self.assertEqual(
+            self.context.calls[-1],
+            ("get_financial_data", (fields, stocks, "20240101", "20241231",
+                                    "report_time", 2)))
+
+        self.provider.get_financial_data(
+            stocks, fields, "20240101", "20241231", "report_time")
+        self.assertEqual(
+            self.context.calls[-1],
+            ("get_financial_data", (fields, stocks, "20240101", "20241231",
+                                    "report_time")))
 
 # ----------------------------------------------------------------------
 # issue #262：README「合约/品种」一行按名字列出来的方法，客户端得能按名字调

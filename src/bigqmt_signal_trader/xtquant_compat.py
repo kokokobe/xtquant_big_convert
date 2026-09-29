@@ -3779,14 +3779,40 @@ class BigQmtXtData:
     def get_his_option_list_batch(self, undl_code, start_time="", end_time=""):
         return self._call("get_his_option_list_batch", undl_code=undl_code, start_time=start_time, end_time=end_time)
 
-    def get_financial_data(self, stock_list, table_list=None, start_time="", end_time="", report_type="report_time"):
+    def get_financial_data(
+        self, stock_list, table_list=None, start_time="", end_time="",
+        report_type="report_time", pos=None,
+    ):
+        params = {
+            "stock_list": list(stock_list or []),
+            "table_list": list(table_list or []),
+            "start_time": start_time,
+            "end_time": end_time,
+            "report_type": report_type,
+        }
+        if pos is not None:
+            params["pos"] = pos
+        return self._call("get_financial_data", **params)
+
+    def get_sector(self, sector_name, real_timetag=-1):
+        """ContextInfo.get_sector(indexCode): 指数成分股，区别于板块名接口。"""
         return self._call(
-            "get_financial_data",
+            "get_sector", sector_name=sector_name, real_timetag=real_timetag)
+
+    def get_market_data_ex_ori(self, field_list=None, stock_list=None, period="1d",
+                               start_time="", end_time="", count=-1,
+                               dividend_type="none", fill_data=True):
+        """按名访问 ContextInfo 原始 K 线接口，便于诊断新老两套回答差异。"""
+        return self._call(
+            "get_market_data_ex_ori",
+            field_list=list(field_list or []),
             stock_list=list(stock_list or []),
-            table_list=list(table_list or []),
+            period=period,
             start_time=start_time,
             end_time=end_time,
-            report_type=report_type,
+            count=count,
+            dividend_type=dividend_type,
+            fill_data=fill_data,
         )
 
     def download_financial_data(self, stock_list, table_list=None, start_time="", end_time="", incrementally=None):
