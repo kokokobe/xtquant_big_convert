@@ -296,8 +296,9 @@ TIMEOUT=数据服务依赖（#143 挂 60-90s，慎调）；**空参 TypeError �
 - **REACHABLE ≠ 不可用**：空参 TypeError 只说明分发通。带真实参数实测
   `download_history_data`（513300.SH 1d 两周）→ ok=True 且 get_market_data_ex
   读回 11 个交易日 OHLC——下载族走 ContextInfo 通道可用（tools/
-  test_download_history.py），qmt_globals 的 false 只代表全局函数未注入，
-  ContextInfo 方法在。**下结论前必须带参实测**
+   test_download_history.py），qmt_globals 的 false 只代表全局函数未注入，
+   ContextInfo 方法在。**下结论前必须带参实测**
+
 - **TIMEOUT ≠ 不可用，可能是超时窗口 < 原生挂起时长**：get_sector_list 实测
   `allow_fallback=true` 秒回 13 个知名板块名 → get_stock_list_in_sector("沪深A股")
   5222 成分 ✓（#130 教训：适配器默认拒绝返回假列表，逃逸参数是显式设计的）。
@@ -314,3 +315,95 @@ TIMEOUT=数据服务依赖（#143 挂 60-90s，慎调）；**空参 TypeError �
   属性（与"广发不支持 set_universe"的旧记录有出入，属性存在≠生效）、get_finance、
   load_stk_list、get_scale_and_rank、get_largecap/midcap/smallcap、get_product_*
   等桥未暴露的方法，按需接入
+
+## 旧 QMT 策略迁移约定
+
+根仓库的 `src/` 旧单文件策略仅作历史对照，不是本桥或 qplatform 的新开发模板。新功能不得在 QMT 侧新增因子计算、实时信号、组合决策、策略风控或交易意图生成；这些能力必须放在 qplatform。本桥只负责行情 / 账户 / 持仓 / 回报透传和 qplatform 交易动作传递。
+
+## QMT 入口函数
+
+```python
+def init(ContextInfo):       # 整个策略开始时调用一次（不可手动调用）
+def after_init(ContextInfo): # init 之后 handlebar 之前调用一次
+def handlebar(C):            # 行情事件，每根 K 线回调一次（按股票逐个）
+def stop(ContextInfo):       # 策略停止前调用（交易连接已断开，不能报单/撤单）
+```
+
+- QMT 不认：`before_trading` / `on_quote_update` / `set_universe(...)`；广发版不支持 `set_universe`。
+- `ContextInfo` 会随 bar 切换重置，不要在其上挂自定义属性；QMT 侧状态使用模块级全局变量 `g_xxx`。
+- `init` 执行完成前部分接口不可用（如 `get_trading_dates`），应放到 `after_init`。
+
+## QMT 运行模式
+
+- 模型交易界面：真实账号 / 模拟账号；QMT 注入全局变量 `account = "资金账号"`。
+- 编辑器界面：仅调试；QMT 不注入 `account`，需要手动 `account = "test"`，`passorder` 不产生实际委托。
+- 回测：`C.do_back_test` 为真，没有真实账号。
+- 判断模式优先用 `C.trade_mode`，三态是 `'simulation'` / `'trading'` / `'backtest'`，比 `C.do_back_test` 更精确。
+
+## QMT 行情与历史 K 线
+
+```python
+from xtquant.xtdata import get_market_data_ex
+
+bar_date = timetag_to_datetime(C.get_bar_timetag(C.barpos), '%Y%m%d%H%M%S')
+
+if C.do_back_test:
+    data = C.get_market_data_ex(
+        [], [code], end_time=bar_date, period="1m", count=31,
+        subscribe=False,
+    )
+else:
+    data = C.get_market_data_ex(
+        [], [code], period="1m", count=31, subscribe=True
+    )
+```
+
+- 跨周期日线未来函数：QMT 回测里 `get_market_data_ex(period="1d", end_time=当根分钟bar)` 会返回当日完整日线；`09:30` 即可见收盘 / 最高 / 全天量。铁律是回测取日线后若末根日期等于当日，必须丢弃；丢弃后仍要检查下游窗口是否满足，例如 MA60 不能因少一根而直接打 0。
+- 免费版数据限制：5m / 1m 各 1 年，tick 1 个月，日线更长。
+- 实盘 / 模拟先回放历史再进实时，启动刷屏是回放不是异常；实盘只下日线，分钟由推送。
+- 模拟 / 实盘 `is_new_bar()` 每根触发；启动回放历史时 `is_last_bar()` 返回 False，可用于跳过回放。
+- `get_history_data` 已过时；统一用 `get_market_data_ex`。
+- 回测不要用 `is_last_bar()` + `is_new_bar()` 组合；会跳过绝大多数股票，回测只认 `is_new_bar()`。
+
+## QMT 下单 API
+
+```python
+# 回测：order_shares 位置参数，shares 必须 float
+order_shares(stockcode, float(shares), "FIX", current_price, C, accid)
+
+# 实盘：passorder 关键字参数
+passorder(opType, 1101, accountID, stockcode, 5, -1, volume股, "策略名", 2, "", C)
+```
+
+- 股数已按 100 股 / 手取整，下单不要再 `*100`。
+- `opType`：23 买，24 卖；回测 `accountID='testS'`，实盘填真实账号。
+- 旧单文件策略使用 `"长线量化v10"` 作为 passorder 策略名；委托备注前缀为 `userOrderId="v10v5_<timestamp>"`。新架构下交易意图由 qplatform 生成，桥侧必须保留可追踪的幂等身份。
+
+## QMT 核心 API 陷阱
+
+| 坑 | 正确做法 |
+|---|---|
+| `C.money` 不存在 | 回测用 `C.capital`（只读初始资金），实盘用 `get_trade_detail_data(accid, "stock", "account")[0].m_dAvailable` |
+| 回测 `get_trade_detail_data` 可能返回空 | 回测不要用它查资金 |
+| `__file__` 不可用 | 用 `os.getcwd()` |
+| 不要自管 `g_cash` | QMT 自动跟踪，否则净值 / 统计指标失真 |
+| ContextInfo 自定义属性会被重置 | 用模块级全局变量 `g_xxx` |
+| QMT 沙箱文件 IO | `open("w" / "wb")` 创建写、`os.remove`、sqlite3 可用；`open("rb" / "r+b")`、`os.open(O_RDWR)` 读已存在文件通常被按路径拒绝。文件映射 mmap 需 RW 句柄，此路不通。配置 / 持久化优先 sqlite3 或写后不复读 |
+| QMT 沙箱网络 IO | 模型交易面板按 10s 节拍扫描进程 TCP 连接，白名单外对端（包括回环）会触发 `illegal IP` 并全面板停止策略。QMT 进程零非 QMT TCP 连接；跨进程通信使用本桥的 shm 传输。redis / 公网拉数据只允许在非模型交易环境或外部 qplatform 侧做 |
+| pyzmq 禁入 QMT | libzmq signaler 使用回环 TCP 自连；`Context.instance()` 不随策略停止回收。任何模式都不要把 pyzmq 引入 QMT 进程 |
+| FormulaServer 入站连接 | 外部客户端直连 `:58600` 的对端也是白名单外；模型交易面板跑桥期间必须关闭 FormulaServer fastpath |
+| 日志 | `print()` 落盘到 `userdata/log/XtClient_FormulaOutput_YYYYMMDD.log` |
+| QMT 日志目录 | `D:\广发证券QMT量化交易系统 - 交易端\userdata\log\`，日志文件为 UTF-8；先看 FormulaOutput，再看 Message，最后看主日志和数据源日志 |
+| 回测 T+1 | 当日买入不可卖；引擎“可卖 0 股，跳过”不是成交。卖出前必须过 T+1 capped shares，否则幽灵仓漂移 |
+| 回测买入资金不足 | 引擎“可用资金不足，跳过”不是成交；买入前必须资金守卫，否则会虚构盈利 |
+
+## QMT 官方文档
+
+| 主题 | 链接 |
+|---|---|
+| 系统函数 | https://dict.thinktrader.net/innerApi/system_function.html |
+| 行情函数 | https://dict.thinktrader.net/innerApi/data_function.html |
+| 交易函数 | https://dict.thinktrader.net/innerApi/trading_function.html |
+| 成交回报 | https://dict.thinktrader.net/innerApi/callback_function.html |
+
+迅投官方文档示例通常是 GBK（`#coding:gbk`）。复制到本桥 / QMT 侧保持 GBK；复制到 qplatform / AI 侧时先重编码为 UTF-8。
