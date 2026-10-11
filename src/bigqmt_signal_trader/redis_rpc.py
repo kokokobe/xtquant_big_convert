@@ -116,6 +116,13 @@ READ_METHODS = {
     "bus_publish",
     "bus_inbox_start",
     "bus_inbox_drain",
+    "paper_submit_order",
+    "paper_cancel_order",
+    "paper_fill_order",
+    "paper_query_order",
+    "paper_query_orders",
+    "paper_query_fills",
+    "paper_account_snapshot",
 }
 
 ORDER_METHODS = {
@@ -776,6 +783,8 @@ class BigQmtRpcHandlers:
         self.credit_account_min_interval_seconds = CREDIT_ACCOUNT_MIN_INTERVAL_SECONDS
         self.credit_account_max_wait_seconds = CREDIT_ACCOUNT_MAX_WAIT_SECONDS
         self.credit_account_max_age_seconds = CREDIT_ACCOUNT_MAX_AGE_SECONDS
+        from .paper import PaperOrderBook
+        self.paper_order_book = PaperOrderBook()
         if allowed_methods is None:
             allowed = set(READ_METHODS)
             if self.allow_order_methods:
@@ -2377,6 +2386,27 @@ class BigQmtRpcHandlers:
             detail_type, start_date, end_date
         )
         return result
+
+    def _handle_paper_submit_order(self, params):
+        return self.paper_order_book.submit_order(params)
+
+    def _handle_paper_cancel_order(self, params):
+        return self.paper_order_book.cancel_order(params)
+
+    def _handle_paper_fill_order(self, params):
+        return self.paper_order_book.fill_order(params)
+
+    def _handle_paper_query_order(self, params):
+        return self.paper_order_book.query_order(params)
+
+    def _handle_paper_query_orders(self, params):
+        return self.paper_order_book.query_orders(params)
+
+    def _handle_paper_query_fills(self, params):
+        return self.paper_order_book.query_fills(params)
+
+    def _handle_paper_account_snapshot(self, params):
+        return self.paper_order_book.account_snapshot(params)
 
     def _handle_get_assure_contract(self, params):
         return self._call_qmt_global("get_assure_contract", self._request_account_id(params))
