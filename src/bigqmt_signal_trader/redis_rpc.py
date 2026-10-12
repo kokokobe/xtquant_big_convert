@@ -136,6 +136,16 @@ ORDER_METHODS = {
     "passorder",
 }
 
+# Paper order writes are NOT order methods: they never touch the real
+# gateway and are allowed without allow_order_methods. They are still
+# writes a caller can time out on, so they join the at-most-once claim
+# and get_request_outcome accounting -- but only via this set. Anything
+# gating real dispatch keeps using ORDER_METHODS.
+OUTCOME_CLAIMED_ORDER_METHODS = ORDER_METHODS | {
+    "paper_submit_order",
+    "paper_cancel_order",
+}
+
 # Whole-quote push subscription control methods. These drive a server-side
 # QuoteSubscriptionManager (reference-counted ContextInfo.subscribe_whole_quote)
 # rather than a market_data read; the data itself flows over the push channel.
@@ -4366,7 +4376,8 @@ class RedisPubSubRpcService:
     # Cancels run however late they arrive: a late cancel is harmless and is
     # exactly what a caller who gave up on it still wants. A late submit is
     # the opposite -- the caller has already decided it did not happen.
-    _EXPIRY_EXEMPT_METHODS = frozenset(["cancel_order", "cancel_orders_batch"])
+    _EXPIRY_EXEMPT_METHODS = frozenset(
+        ["cancel_order", "cancel_orders_batch", "paper_cancel_order"])
 
     def _client_deadline(self, request):
         """When this request's caller stops listening, on the server clock.
@@ -4469,7 +4480,7 @@ class RedisPubSubRpcService:
         # both copies name the same reply key, so it lands where the client is
         # already waiting.
         order_key = None
-        if request_id and self._canonical(method) in ORDER_METHODS:
+        if request_id and self._canonical(method) in OUTCOME_CLAIMED_ORDER_METHODS:
             order_key = (account_id, request_id)
             seen = self._claim_order_request(order_key)
             if seen is not None:
