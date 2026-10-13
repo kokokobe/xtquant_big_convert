@@ -72,6 +72,11 @@ READ_METHODS = {
     "get_positions",
     "get_position_statistics",
     "get_asset",
+    # CANARY 只读查询（real = 真实柜台 get_trade_detail_data 的归一化透传，
+    # 消费端是 qplatform rust_engine BigQmtRealGateway）。只读，不需要
+    # allow_order_methods 门控。
+    "real_query_orders",
+    "real_query_deals",
     "query_orders",
     "query_trades",
     "query_execution_snapshot",
@@ -167,6 +172,11 @@ LISTENER_DEFERRED_METHODS = {
     "get_positions",
     "get_position_statistics",
     "query_stock_position",
+    # real_query_* 与 query_orders/query_trades 同线程路径：都经
+    # get_trade_detail_data，后台线程上返回空，必须由 adjust drain 在主线程
+    # 跑（见上方 #204 / get_ipo_data 注释）。
+    "real_query_orders",
+    "real_query_deals",
     "query_orders",
     "query_trades",
     "query_execution_snapshot",
@@ -700,6 +710,92 @@ class CancelSettlement(object):
         self.attempts = 0
         self.request = None
         self.response = None
+
+
+# ---- CANARY real 查询归一化（real_query_orders / real_query_deals） --------
+#
+# 消费端是 qplatform rust_engine 的 BigQmtRealGateway（Task 7 已按形状契约表
+# 实现），行字段类型必须恒定：int 字段缺值补 0，price 恒 float —— Rust 侧按
+# as_u64 / as_f64 解析，缺字段或类型错会被静默跳过。
+#
+# 归一化不在这里重复做：handler 复用 BigQmtOrderGateway.query_orders_strict /
+# query_trades_strict 已经做好的 原始字段 -> 快照字段 映射（那张映射表见
+# adapters/order_bigqmt.py，等价于下表），这里只做快照 -> 契约 dict 的定形：
+#
+#   ORDER 原始行字段            -> 契约字段
+#   m_strOrderSysID             -> order_sys_id
+#   m_strRemark（原文，不清洗）  -> user_order_id
+#   m_strInstrumentID+m_strExchangeID -> stock_code（_full_code 归一化）
+#   m_nOffsetFlag / m_nOpType   -> action（BUY/SELL，_action_from_offset_flag）
+#   m_nVolumeTotalOriginal      -> order_volume  (int)
+#   m_nVolumeTraded             -> traded_volume (int)
+#   m_dLimitPrice               -> price         (float)
+#   m_nOrderStatus              -> status        (int 原值透传；QMT 状态 int ->
+#                                  账本状态的映射归属 Rust 侧
+#                                  bigqmt_real_gateway.rs state_for_qmt_status，
+#                                  52|53|54=CANCELLED, 56=FILLED, 57=REJECTED,
+#                                  51|55=PARTIALLY_FILLED, 其余=ACKNOWLEDGED)
+#   m_strInsertDate+m_strInsertTime -> order_time（unix 秒）
+#
+#   DEAL 原始行字段             -> 契约字段
+#   m_strTradeID                -> trade_id（Rust 的成交幂等键 broker_fill_id）
+#   m_strOrderSysID             -> order_sys_id
+#   m_strRemark（原文，不清洗）  -> user_order_id
+#   m_strInstrumentID+m_strExchangeID -> stock_code
+#   m_nOffsetFlag / m_nOpType   -> action
+#   m_nVolume                   -> volume (int)
+#   m_dPrice                    -> price  (float)
+#   m_strTradeTime              -> traded_at
+#
+# 解析失败的行在 gateway 层已被 skip_unparsable_row 跳过，不会到这里。
+
+
+def _int_or_zero(value):
+    """契约 int 字段的定形：可解析则 int，缺值/脏值补 0。
+
+    status 走这里时，QMT 状态是 "56" 这类字符串，int() 恢复原值；拿不到状态
+    的行给 0（Rust 侧未知状态归 ACKNOWLEDGED，语义安全）。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _real_order_row(snapshot):
+    return {
+        "order_sys_id": str(snapshot.order_sys_id or ""),
+        "user_order_id": str(snapshot.user_order_id or ""),
+        "stock_code": str(snapshot.stock_code or ""),
+        "action": str(snapshot.action or ""),
+        "order_volume": _int_or_zero(snapshot.volume),
+        "traded_volume": _int_or_zero(snapshot.traded_volume),
+        "price": float(snapshot.price or 0.0),
+        "status": _int_or_zero(snapshot.status),
+        "order_time": _int_or_zero(snapshot.order_time),
+    }
+
+
+def _real_deal_row(snapshot):
+    return {
+        "trade_id": str(snapshot.trade_id or ""),
+        "order_sys_id": str(snapshot.order_sys_id or ""),
+        "user_order_id": str(snapshot.user_order_id or ""),
+        "stock_code": str(snapshot.stock_code or ""),
+        "action": str(snapshot.action or ""),
+        "volume": _int_or_zero(snapshot.volume),
+        "price": float(snapshot.price or 0.0),
+        "traded_at": str(snapshot.traded_at or ""),
+    }
+
+
+def _filter_by_user_order_id(rows, wanted):
+    """user_order_id 过滤。**精确等值**，不 strip：remark 原文即身份，Rust 侧
+    拿它跟自己下单时的 coid 全等比对，这里任何清洗都会破坏该契约。"""
+    wanted = str(wanted or "")
+    if not wanted:
+        return rows
+    return [row for row in rows if row["user_order_id"] == wanted]
 
 
 class BigQmtRpcHandlers:
@@ -1874,6 +1970,32 @@ class BigQmtRpcHandlers:
             account_id,
             self.order_gateway.query_trades(account_id, str(strategy_name)),
         )
+
+    def _handle_real_query_orders(self, params):
+        """CANARY 只读：真实柜台委托行的归一化裸 list（契约见
+        _real_order_row 上方注释与 rust_engine bigqmt_real_gateway.rs）。
+
+        与 query_orders 同一条 get_trade_detail_data 主线程路径：复用
+        order_gateway 的快照查询（strategy_name 传 "" = 不过滤，见
+        _handle_query_orders 的注释），只做形状定形。不进
+        _attribute_to_strategies —— 这里不标记策略名，身份就是 remark 原文。
+        """
+        if self.order_gateway is None:
+            raise RuntimeError("order_gateway is not configured")
+        account_id = self._request_account_id(params)
+        rows = self.order_gateway.query_orders(account_id, "")
+        result = [_real_order_row(row) for row in (rows or [])]
+        return _filter_by_user_order_id(result, params.get("user_order_id"))
+
+    def _handle_real_query_deals(self, params):
+        """CANARY 只读：真实柜台成交行的归一化裸 list。契约 params 是 {}，
+        但容忍可选 user_order_id 过滤（Rust 只发 {}）。同上，主线程路径。"""
+        if self.order_gateway is None:
+            raise RuntimeError("order_gateway is not configured")
+        account_id = self._request_account_id(params)
+        rows = self.order_gateway.query_trades(account_id, "")
+        result = [_real_deal_row(row) for row in (rows or [])]
+        return _filter_by_user_order_id(result, params.get("user_order_id"))
 
     def _attribute_to_strategies(self, account_id, snapshots):
         """Put the caller's strategy name on rows this bridge submitted.

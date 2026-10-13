@@ -3,6 +3,29 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
+## [0.3.63] - 2026-10-13
+
+### 新增
+
+- **`real_query_orders` / `real_query_deals` 只读 RPC 方法**（qplatform D2.2
+  Canary Task 11）。包 `get_trade_detail_data("ORDER"/"DEAL")`，经既有
+  `BigQmtOrderGateway` 快照查询归一化成裸 list 行，消费端是 qplatform
+  rust_engine 的 `BigQmtRealGateway`（CANARY 真实委托链路的 QUERY / 撤单前
+  sysid 解析 / 成交 diff）。行字段契约：
+  - orders：`{order_sys_id, user_order_id(=remark 原文), stock_code, action,
+    order_volume, traded_volume, price, status, order_time}`；
+  - deals：`{trade_id, order_sys_id, user_order_id, stock_code, action,
+    volume, price, traded_at}`。
+  int 字段缺值补 0、price 恒 float（Rust 按 as_u64/as_f64 解析，缺字段或类型
+  错会被静默跳过）；`status` 是 QMT 订单状态 int 原值透传，状态映射归属 Rust
+  侧（52|53|54=CANCELLED, 56=FILLED, 57=REJECTED, 51|55=PARTIALLY_FILLED,
+  其余=ACKNOWLEDGED）。
+- 两个方法只读，注册进 `READ_METHODS`，**不需要** `allow_order_methods`；
+  同时进 `LISTENER_DEFERRED_METHODS`，与 `query_orders`/`query_trades` 同
+  线程路径（`get_trade_detail_data` 只在 QMT 主线程有数据，由 adjust drain
+  在主线程执行，未新开线程）。`real_query_orders` 支持可选 `user_order_id`
+  精确过滤（不清洗 remark 原文）；未知 coid 返回空 list，不是错误。
+
 ## [0.3.62] - 2026-09-27
 
 ### 变更
