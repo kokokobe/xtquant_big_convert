@@ -291,6 +291,24 @@ import os
 import sys
 import types
 
+# QMT 的策略文件 exec 期会把 sys.modules["builtins"] 换成被削过名字的存根
+# （缺 RuntimeError / Exception 等异常类；0.3.64 flat 预加载崩溃的根因：
+# _load_local_module 用 dict(_builtins.__dict__) 构建模块命名空间，exec_push
+# 拉起的 transports/base.py 第一条模块级内建名引用
+# class TransportError(RuntimeError) 直接 NameError，连 strategy 模块里
+# _load_exec_push 的 except Exception 兜底也在同一份残缺内建名上二次
+# NameError，异常穿透 shell 顶层兜底，整个桥起不来）。同阶段唯一被证明
+# 完整可用的是 shell exec globals 的 __builtins__（shell 自己的
+# except Exception 处理器就跑在它上面），所以模块内建名优先取它，
+# 再并入 import builtins 的名字兜底；健康解释器里两者相同，行为不变。
+_SHELL_BUILTINS = globals().get("__builtins__", _builtins)
+_SHELL_BUILTINS_NAMES = dict(
+    _SHELL_BUILTINS if isinstance(_SHELL_BUILTINS, dict)
+    else getattr(_SHELL_BUILTINS, "__dict__", None) or _builtins.__dict__)
+for _shell_builtin_name, _shell_builtin_value in _builtins.__dict__.items():
+    _SHELL_BUILTINS_NAMES.setdefault(_shell_builtin_name, _shell_builtin_value)
+del _SHELL_BUILTINS, _shell_builtin_name, _shell_builtin_value
+
 
 # =========================== config block ===========================
 BIGQMT_ACCOUNT_ID = "YOUR_ACCOUNT_ID"
@@ -448,7 +466,8 @@ def _load_local_module(name):
     module.__package__ = name if is_package else name.rpartition(".")[0]
     if is_package:
         module.__path__ = [os.path.dirname(module.__file__)]
-    module_builtins = dict(_builtins.__dict__)
+    # 内建名来自 shell exec globals（见文件头部 _SHELL_BUILTINS_NAMES 注释）。
+    module_builtins = dict(_SHELL_BUILTINS_NAMES)
     module_builtins["__import__"] = _local_import
     module.__dict__["__builtins__"] = module_builtins
     module.__dict__["__bigqmt_load_local_module"] = _load_local_module

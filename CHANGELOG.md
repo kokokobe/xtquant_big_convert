@@ -3,6 +3,33 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
+## [0.3.65] - 2026-10-14
+
+### 修复
+
+- **flat 部署预加载崩溃：QMT exec 期内建名残缺导致整个桥起不来**（0.3.64
+  引入路径，真机实锤）。exec_push（D2.2-R1）把 `transports` 链的首次执行拖
+  进了策略文件 exec 期；QMT 沙箱在该阶段 `import builtins` 拿到的是被削过
+  名字的存根（缺 `RuntimeError` / `Exception` 等异常类），flat 加载器
+  `_load_local_module` 一直用 `dict(_builtins.__dict__)` 构建模块命名空间，
+  于是懒加载链上第一条模块级内建名引用 —— `transports/base.py` 的
+  `class TransportError(RuntimeError)` —— 直接 `NameError`；strategy 模块里
+  `_load_exec_push` 的 `except Exception` 兜底也在同一份残缺内建名上二次
+  NameError，异常穿透 shell 顶层兜底（`bridge preload failed: name
+  'Exception' is not defined`），随后运行时无守卫重载 strategy 模块再崩，
+  预加载彻底失败。此前 57 个预加载模块没有任何模块级非 object 内建名引用、
+  transports 链一直拖到 init 期（QMT 主执行上下文，`import builtins` 完整）
+  才首次执行，同一缺陷潜伏至今未发。
+  修复：flat 加载器构建模块内建名改为**优先取 shell exec globals 的
+  `__builtins__`**（同阶段唯一被证明完整可用的命名空间 —— shell 自己的
+  `except Exception` 处理器就跑在它上面），再并入 `import builtins` 的名字
+  兜底；健康解释器里两者相同，行为不变。回归测试
+  `tests/infra/test_flat_preload_builtins.py` 在真实构建产物上复现 QMT 环境
+  （`sys.modules["builtins"]` 换成剥掉异常类的存根、exec globals 的
+  `__builtins__` 完整），钉住预加载无 NameError、exec_push /
+  transports.base 正常加载、加载器确实从 exec globals 取内建名。
+
+
 ## [0.3.64] - 2026-10-14
 
 ### 新增
