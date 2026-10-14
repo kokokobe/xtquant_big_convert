@@ -126,6 +126,28 @@ def _load_exec_events():
 _exec_events = _load_exec_events()
 
 
+# exec 推送环模块（D2.2-R1）。与 exec_events 同款纪律：模块加载时导入、绝不
+# 在 C++ 回调线程里首导（回调线程首导未加载模块表现为无堆栈 SystemError，
+# issue #76）。导入失败只禁用推送环（rust 侧退回轮询），不影响桥本体。
+def _load_exec_push():
+    try:
+        if _load_bridge_module is not None:
+            return _load_bridge_module("bigqmt_signal_trader.exec_push")
+        from bigqmt_signal_trader import exec_push
+        return exec_push
+    except Exception as _exec_push_err:
+        print("[bigqmt_signal_trader] exec_push load failed; exec push ring "
+              "is disabled for this run: %s" % _exec_push_err)
+        return None
+
+
+_exec_push = _load_exec_push()
+
+# exec 推送环写端（ExecPushPublisher）。init() 在交易账号就绪且 transport=shm
+# 时创建；None = 未启用 / 创建失败，回调发布路径直接跳过。
+_exec_push_publisher = None
+
+
 _app_factory = None
 _account_id = ""
 _config = {}
@@ -278,6 +300,7 @@ def _rebind_module_level_imports():
     global _adapter_factory, _runner, _runtime_bigqmt, _default_build_app
     global forward_order_event, forward_trade_event, init_app, _reset_runner_app
     global sync_positions_app, tick_app, BigQmtRuntimeAdapter, _exec_events
+    global _exec_push
 
     if _load_bridge_module is not None:
         _adapter_factory = _load_bridge_module("bigqmt_signal_trader.adapter_factory")
@@ -305,6 +328,7 @@ def _rebind_module_level_imports():
         tick_app = _rn.tick_app
         BigQmtRuntimeAdapter = _ra
     _exec_events = _load_exec_events()
+    _exec_push = _load_exec_push()
 
 
 def _pending_response_count():
@@ -1229,6 +1253,12 @@ def init(ContextInfo):
         # the RPC service didn't start instead of QMT silently exiting.
         _log_startup_error("rpc service start failed: %s" % exc)
     try:
+        # exec 推送环写端：交易账号就绪后建环（仅 transport=shm 部署）。
+        # D2.2-R1 —— rust_engine 从轮询 QMT 本地缓存改为被回调实时唤醒。
+        _ensure_exec_push_publisher(config)
+    except Exception as exc:
+        _log_startup_error("exec push publisher init failed: %s" % exc)
+    try:
         _schedule_adjust_if_needed(ContextInfo, config)
     except Exception as exc:
         _log_startup_error("schedule adjust failed: %s" % exc)
@@ -1989,8 +2019,172 @@ def _publish_exec_event(kind, obj, context_info=None):
         )
 
 
+def _exec_push_transport_name(config):
+    return str((config.get("rpc") or {}).get("transport") or "redis").lower()
+
+
+def _ensure_exec_push_publisher(config):
+    """交易账号就绪后创建 exec 推送环写端（D2.2-R1，仅 transport=shm）。
+
+    挂在 init() 的 _start_rpc_service 之后：此时账号已定（config.account_id
+    来自 set_account/_detect_account_id）、传输形态已定（rpc.transport）。只有
+    shm 部署建环 —— redis/zmq 部署的 exec 事件走各自既有主推通道，rust 读端
+    也只在 shm 段上等；非 shm 一律 None，回调发布路径零改动。创建失败降级为
+    None 并留痕一次：推送环是加速路径，不是主推依赖，掉帧由 rust 侧轮询兜底。
+    段/事件/互斥体按名字幂等，reload 重跑 init 复用既有内核对象且 write_seq
+    从 header 续读 —— 跨 publisher 实例单调，rust 读端游标永不回退；所以
+    reset_app() 刻意不关它。
+    """
+    global _exec_push_publisher
+    if _exec_push is None:
+        return None
+    if _exec_push_transport_name(config) != "shm":
+        return None
+    account_id = str(config.get("account_id") or _account_id or "")
+    if not account_id:
+        return None
+    if _exec_push_publisher is not None:
+        if _exec_push_publisher.account_id == account_id:
+            return _exec_push_publisher
+        try:
+            _exec_push_publisher.close()
+        except Exception:
+            pass
+        _exec_push_publisher = None
+    # prefix 空串由 ExecPushPublisher 自己落默认值（exec_push.DEFAULT_SHM_PREFIX）。
+    prefix = str((config.get("exec_push") or {}).get("prefix") or "")
+    try:
+        _exec_push_publisher = _exec_push.ExecPushPublisher(prefix, account_id)
+    except Exception as exc:
+        _exec_push_publisher = None
+        _log_err("exec_push",
+                 "exec push publisher init failed (exec push disabled): "
+                 "%s (%s)" % (exc, exc.__class__.__name__))
+        return None
+    print("[bigqmt_exec_push] publisher started section=%s"
+          % _exec_push_publisher.section_name)
+    return _exec_push_publisher
+
+
+def _exec_push_int(value):
+    """契约 int 字段定形：缺值/脏值补 0（Rust 按 as_u64 解析）。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _exec_push_float(value):
+    """契约 price 定形：恒 float（Rust 按 as_f64 解析）。"""
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _exec_push_order_row(event):
+    """normalize_order_event 的事件 -> exec 推送环 order 契约行。
+
+    字段映射（原始 QMT 字段 -> normalize 后事件键 -> Task 11 契约字段，口径
+    对齐 redis_rpc._real_order_row 与 adapters/order_bigqmt
+    query_orders_strict 的快照字段）：
+
+        m_strOrderSysID                     -> order_sys_id
+        m_strRemark（原文，即下单 remark）  -> user_order_id
+        m_strInstrumentID+m_strExchangeID   -> stock_code（已带交易所后缀）
+        m_nOffsetFlag/m_nDirection 仲裁     -> action（BUY/SELL）
+        m_nVolumeTotalOriginal（原始委托量）-> order_volume   (int)
+        m_nVolumeTraded                     -> traded_volume  (int)
+        m_dLimitPrice                       -> price          (float)
+        m_nOrderStatus（int 原值透传，状态映射归 rust 侧）
+                                            -> status         (int)
+        m_strInsertDate+m_strInsertTime     -> order_time     (unix 秒)
+    """
+    return {
+        "order_sys_id": str(event.get("order_sys_id") or ""),
+        "user_order_id": str(event.get("user_order_id") or ""),
+        "stock_code": str(event.get("stock_code") or ""),
+        "action": str(event.get("action") or ""),
+        "order_volume": _exec_push_int(event.get("order_volume")),
+        "traded_volume": _exec_push_int(event.get("traded_volume")),
+        "price": _exec_push_float(event.get("price")),
+        "status": _exec_push_int(event.get("status")),
+        "order_time": _exec_push_int(event.get("order_time")),
+    }
+
+
+def _exec_push_deal_row(event):
+    """normalize_trade_event 的事件 -> exec 推送环 deal 契约行。
+
+    字段映射（原始 QMT 字段 -> normalize 后事件键 -> Task 11 契约字段，口径
+    对齐 redis_rpc._real_deal_row 与 adapters/order_bigqmt
+    query_trades_strict 的快照字段）：
+
+        m_strTradeID（rust 成交幂等键）     -> trade_id
+        m_strOrderSysID                     -> order_sys_id
+        m_strRemark（原文）                 -> user_order_id
+        m_strInstrumentID+m_strExchangeID   -> stock_code
+        m_nOffsetFlag/m_nDirection 仲裁     -> action
+        m_nVolume                           -> volume    (int)
+        m_dPrice                            -> price     (float)
+        m_strTradeTime                      -> traded_at
+    """
+    return {
+        "trade_id": str(event.get("trade_id") or ""),
+        "order_sys_id": str(event.get("order_sys_id") or ""),
+        "user_order_id": str(event.get("user_order_id") or ""),
+        "stock_code": str(event.get("stock_code") or ""),
+        "action": str(event.get("action") or ""),
+        "volume": _exec_push_int(event.get("volume")),
+        "price": _exec_push_float(event.get("price")),
+        "traded_at": str(event.get("traded_at") or ""),
+    }
+
+
+def _exec_push_publish(kind, obj):
+    """把一笔原生委托/成交实时写进 exec 推送环（D2.2-R1）。
+
+    独立于 _publish_exec_event 的一条加法路径：不动 redis/quote-push 任何
+    既有 sink 逻辑（也不受其 early-return 影响 —— shm 部署没有 redis，
+    _exec_event_sink 为 None，推送环恰恰是给这种部署用的）。publisher 为
+    None（非 shm 部署 / 创建失败 / 未 init）直接跳过。任何异常不上抛 ——
+    本函数跑在 QMT 的 C++ 回调线程上，回调里抛异常在 QMT 侧表现为没有
+    堆栈的 SystemError（issue #76）；publisher 内部同样吞错计 drops。
+    """
+    publisher = _exec_push_publisher
+    if publisher is None or _exec_push is None or _exec_events is None:
+        return False
+    try:
+        account_id = str(_event_account_id(obj) or _account_id or "")
+        if kind == "trade":
+            event = _exec_events.normalize_trade_event(obj, account_id)
+            publisher.publish_deal(_exec_push_deal_row(event))
+        else:
+            event = _exec_events.normalize_order_event(obj, account_id)
+            # QMT 对同一委托先推一次无 sysid 的 pre-sysid 事件，sysid 落地后
+            # 再推孪生（issue #161）。redis 主推把 pre-sysid 帧扣住等孪生；
+            # 推送环直接跳过无 sysid 帧 —— 契约行以 order_sys_id 为关联键，
+            # 空 sysid 帧到 rust 侧只会成为幽灵委托，孪生随后带全字段再来。
+            if not str(event.get("order_sys_id") or ""):
+                return False
+            publisher.publish_order(_exec_push_order_row(event))
+        return True
+    except Exception as exc:
+        # 到这里只可能是归一化失败（publisher 自身吞错计 drops）。与
+        # _publish_exec_event 的口径一致：留痕，但不向回调线程抛。
+        try:
+            _log_err("exec_push",
+                     "building/publishing the %s frame failed: %s (%s)"
+                     % (kind, exc, exc.__class__.__name__))
+        except Exception:
+            pass
+        return False
+
+
 def order_callback(ContextInfo, orderInfo):
     """Standard Big QMT order callback."""
+    # exec 推送环先行：纯内存写 + SetEvent，是 rust 侧拿委托事实的最快路径。
+    _exec_push_publish("order", orderInfo)
     # Settlement feeds on this even when client push is off (issue #164).
     _note_order_watch(orderInfo)
     _publish_exec_event("order", orderInfo, ContextInfo)
@@ -1999,6 +2193,7 @@ def order_callback(ContextInfo, orderInfo):
 
 def deal_callback(ContextInfo, dealInfo):
     """Standard Big QMT deal callback."""
+    _exec_push_publish("trade", dealInfo)
     _publish_exec_event("trade", dealInfo, ContextInfo)
     return forward_trade_event(BigQmtRuntimeAdapter.to_trade_event(dealInfo))
 

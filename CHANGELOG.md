@@ -3,6 +3,34 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
+## [0.3.64] - 2026-10-14
+
+### 新增
+
+- **exec 推送环写端（D2.2-R1：回调实时进 SHM）**。新增
+  `bigqmt_signal_trader/exec_push.py`（GBK / py3.6）：`ExecPushPublisher`
+  在命名共享内存段 `{prefix}_exec_{acct}`（默认 prefix `bigqmt_shm`，事件
+  `{prefix}_exec_evt_{acct}`、互斥体 `{prefix}_exec_mtx_{acct}`）上按协议
+  v1 帧格式（header `<4sIIIQI` + 48B slot 头，几何 256×16KB 协议常量）发布
+  UTF-8 JSON 单行 `{"kind":"order"|"deal", "row":{...}}`，每帧 SetEvent
+  一次；帧写入原语复用 shm_transport 请求线（互斥体内 seq 分配+写入+header
+  bump 单临界区），write_seq 跨 publisher 重建从 header 续读，rust 读端游标
+  单调。任何写异常吞掉计入 `drops`，绝不向 QMT 回调线程抛错。
+- **order_callback / deal_callback 加一路实时发布**（独立加法路径，redis/
+  quote-push 既有 sink 逻辑零改动）：normalize 后的事件映射为 Task 11 契约行
+  （字段口径对齐 `redis_rpc._real_order_row/_real_deal_row`：order=`order_sys_id/
+  user_order_id(=remark)/stock_code/action/order_volume/traded_volume/price/
+  status(int)/order_time`，deal=`trade_id/order_sys_id/user_order_id/stock_code/
+  action/volume/price/traded_at`；int 缺值补 0、price 恒 float）。无 sysid 的
+  pre-sysid 委托帧不入环（issue #161 孪生随后带 sysid 再来），避免 rust 侧
+  幽灵委托。
+- **接线开关**：`init()` 在 `_start_rpc_service` 之后（交易账号就绪）调
+  `_ensure_exec_push_publisher` —— 仅 `rpc.transport == "shm"` 部署创建，
+  非 shm / 无账号 / 创建失败一律 None 并留痕一次；段/事件/互斥体按名幂等，
+  reload 重跑 init 复用既有内核对象。消费端是 rust_engine 的
+  `ShmRing::open(section, event, mutex, 256, 16384)` + `poll_frames()` +
+  `wait_event(timeout_ms)`（既有原语），替代轮询 QMT 本地缓存（刷新滞后）。
+
 ## [0.3.63] - 2026-10-13
 
 ### 新增
