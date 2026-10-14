@@ -54,12 +54,22 @@ def build_flat():
     return _built[0]
 
 
-def _make_stub_builtins():
-    """QMT 式存根：保留类型 / 函数，剥掉全部异常类。"""
+def _make_stub_builtins(drop=None):
+    """QMT 式存根：默认保留类型 / 函数，剥掉全部异常类。
+
+    ``drop`` 可指定只剥部分异常类（双存根降级场景用：真机 concern 形态是
+    存根保留 Exception，仅缺 transports/base.py 类基需要的 RuntimeError /
+    TimeoutError）。ModuleNotFoundError / NameError 一律保留——加载器自己的
+    except 子句和模块级 from-import 兜底依赖它们，缺了就不是在测降级路径。
+    """
     import builtins as real_builtins
+    drop = set(drop) if drop is not None else None
     stub = types.ModuleType("builtins")
     for name, value in vars(real_builtins).items():
-        if isinstance(value, type) and issubclass(value, BaseException):
+        if (isinstance(value, type) and issubclass(value, BaseException)
+                and name not in ("BaseException", "Exception", "NameError",
+                                 "ModuleNotFoundError", "ImportError")
+                and (drop is None or name in drop)):
             continue
         stub.__dict__[name] = value
     return stub
@@ -84,25 +94,35 @@ class FlatPreloadRestrictedBuiltinsTest(unittest.TestCase):
             if name.startswith("bigqmt"):
                 sys.modules.pop(name, None)
 
-    def _exec_flat_under_qmt_like_sandbox(self):
+    def _exec_flat_under_qmt_like_sandbox(self, dual_stub=False):
         path, source = build_flat()
         code = compile(source, path, "exec")
         import builtins as real_builtins
-        sys.modules["builtins"] = self._builtins_stub
+        if dual_stub:
+            # concern ① 形态：exec globals 的 __builtins__ 与 import builtins
+            # 双双是存根（保留 Exception，缺 RuntimeError / TimeoutError），
+            # 合并快照仍缺 transports/base.py 类基 -> 走 _load_exec_push 降级。
+            shell_builtins = dict(vars(_make_stub_builtins(
+                drop=("RuntimeError", "TimeoutError"))))
+            sys.modules["builtins"] = _make_stub_builtins(
+                drop=("RuntimeError", "TimeoutError"))
+        else:
+            shell_builtins = dict(vars(real_builtins))
+            sys.modules["builtins"] = self._builtins_stub
         exec_globals = {
             "__name__": "bigqmt_flat_under_test",
             "__file__": path,
-            # shell 自己的帧用这份完整内建名（QMT exec globals 的角色）。
-            "__builtins__": dict(vars(real_builtins)),
+            # shell 自己的帧用这份内建名（QMT exec globals 的角色）。
+            "__builtins__": shell_builtins,
         }
         buffer = io.StringIO()
         with redirect_stdout(buffer):
             exec(code, exec_globals)  # 崩溃会直接抛 NameError
-        return buffer.getvalue()
+        return buffer.getvalue(), exec_globals
 
     def test_preload_survives_stubbed_builtins_module(self):
         """0.3.64 真机崩溃签名：模块命名空间里 RuntimeError / Exception 解析不到。"""
-        output = self._exec_flat_under_qmt_like_sandbox()
+        output, _exec_globals = self._exec_flat_under_qmt_like_sandbox()
         self.assertNotIn("preload failed", output, output)
         self.assertNotIn("load failed", output, output)
         self.assertIn("bigqmt_signal_trader.exec_push", sys.modules)
@@ -111,6 +131,24 @@ class FlatPreloadRestrictedBuiltinsTest(unittest.TestCase):
         # transports 链在预加载期被 exec_push 拉起，异常基类必须可解析。
         base = sys.modules["bigqmt_signal_trader.transports.base"]
         self.assertTrue(hasattr(base, "TransportError"))
+
+    def test_dual_stub_degrades_to_exec_push_disabled(self):
+        """concern ① 降级路径：exec globals 与 import builtins 双存根（保留
+        Exception、缺 RuntimeError / TimeoutError）-> 合并快照仍缺类基 ->
+        transports/base NameError 被 _load_exec_push 的 except Exception 接住
+        -> 打印降级标志、_exec_push=None，桥照常起、推送环禁用。"""
+        output, exec_globals = self._exec_flat_under_qmt_like_sandbox(dual_stub=True)
+        self.assertIn("exec push ring is disabled", output, output)
+        # 降级消息自带 "exec_push load failed"（这是 _load_exec_push 的正常
+        # 留痕，不是预加载崩溃）——预加载不崩的判据是 shell 顶层兜底没触发。
+        self.assertNotIn("bridge preload failed", output, output)
+        self.assertNotIn("exec_events preload failed", output, output)
+        # shell 后续正常完成：版本留痕、账号配置、init 生成。
+        self.assertRegex(output, r"bigqmt_signal_trader \d+\.\d+\.\d+ loaded")
+        self.assertIn("local account config loaded", output, output)
+        self.assertTrue(callable(exec_globals.get("init")))
+        # 推送环写端降级为 None。
+        self.assertIsNone(exec_globals.get("_exec_push"))
 
     def test_loader_sources_module_builtins_from_shell_exec_globals(self):
         """加载器必须从 shell exec globals 的 __builtins__ 取内建名（修复本体），
