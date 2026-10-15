@@ -30,6 +30,7 @@ seq 分配 + 帧写入 + header bump 一个临界区），每帧写完 SetEvent 一次；任何
 
 import ctypes
 import json
+import struct
 
 from .transports.shm_transport import (
     _HDR_BYTES,
@@ -122,6 +123,10 @@ class ExecPushPublisher(object):
             seq = self._ring.write_seq() + 1
             self._ring.write_slot(seq, EXEC_FRAME_ID, payload)
             self._ring._bump_seq(seq)
+            # D2.3: sync writer-side drop counter into the header lost
+            # field (u32 LE @24) so readers observe drops monotonically.
+            self._ring._map.seek(24)
+            self._ring._map.write(struct.pack('<I', int(self.drops) & 0xFFFFFFFF))
         finally:
             self._k32.ReleaseMutex(self._mutex)
         self._k32.SetEvent(self._event)

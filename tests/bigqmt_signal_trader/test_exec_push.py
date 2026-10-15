@@ -391,5 +391,43 @@ class CallbackIntegrationTest(unittest.TestCase):
         self.assertEqual(self.reader.poll_frames(), [])
 
 
+@WINDOWS_ONLY
+class LostHeaderSyncTest(unittest.TestCase):
+    def setUp(self):
+        self.prefix = _unique_prefix()
+        self.publisher = exec_push.ExecPushPublisher(self.prefix, "acct1")
+        self.addCleanup(self.publisher.close)
+
+    def _header_lost(self):
+        import struct as _struct
+        return _struct.unpack('<I', bytes(self.publisher._ring._map[24:28]))[0]
+
+    def test_drop_counter_synced_into_header_lost(self):
+        row = {
+            "order_sys_id": "2209", "user_order_id": "sig-1",
+            "stock_code": "601388.SH", "action": "SELL",
+            "order_volume": 100, "traded_volume": 0,
+            "price": 35.62, "status": 50, "order_time": 1791031800,
+        }
+        # force a drop: writer blows up once, publish swallows and counts
+        real_write = self.publisher._write_frame
+        def _boom(_payload):
+            raise RuntimeError("boom")
+        self.publisher._write_frame = _boom
+        self.publisher.publish_order(row)
+        self.assertEqual(self.publisher.drops, 1)
+        self.assertEqual(self._header_lost(), 0)
+        # next successful publish syncs the drop counter into header lost
+        self.publisher._write_frame = real_write
+        self.publisher.publish_order(row)
+        self.assertEqual(self._header_lost(), 1)
+        # monotonic: further successful publishes keep lost stable
+        self.publisher.publish_order(row)
+        self.assertEqual(self._header_lost(), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,10 @@
+## [0.3.66] - 2026-10-15
+
+### Added
+
+- D2.3: exec 推送环写端把 drops 计数同步进 header lost 字段（u32 LE @24），
+  读端可单调观测丢帧（配 rust_engine 摘要 exec_lost）。
+
 # Changelog
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
