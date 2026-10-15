@@ -124,7 +124,7 @@ class ExecPushPublisher(object):
             self._ring.write_slot(seq, EXEC_FRAME_ID, payload)
             self._ring._bump_seq(seq)
             # D2.3: sync writer-side drop counter into the header lost
-            # field (u32 LE @24) so readers observe drops monotonically.
+            # field (u32 LE @24); reader computes delta against its baseline.
             self._ring._map.seek(24)
             self._ring._map.write(struct.pack('<I', int(self.drops) & 0xFFFFFFFF))
         finally:
