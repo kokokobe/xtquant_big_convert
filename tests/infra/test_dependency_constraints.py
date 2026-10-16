@@ -26,7 +26,9 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # tests/infra/ -> 工程根
 PYPROJECT = os.path.join(ROOT, "pyproject.toml")
-README = os.path.join(ROOT, "docs", "USER_GUIDE.md")
+# 2026-09-29 a0a7c09 把 docs/ 迁到 deploy/docs/（README 精简、敏感信息撤下），
+# 文档路径断言跟着文档走。
+README = os.path.join(ROOT, "deploy", "docs", "USER_GUIDE.md")
 
 
 def _read(path):
