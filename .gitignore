@@ -41,3 +41,6 @@ tools/order_concurrency_report.txt
 tools/adapt_stderr.txt
 tools/adapt_stdout.txt
 tools/sweep_stdout.txt
+
+# 真实客户端配置(含账号,文件自述 DO NOT COMMIT)
+src/bigqmt_signal_trader_client_config.py
