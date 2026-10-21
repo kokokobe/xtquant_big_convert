@@ -161,7 +161,17 @@ class OtherKeysFollowTheSameOrderTest(unittest.TestCase):
 
     def test_defaults_are_unchanged_when_nothing_is_set(self):
         os.environ.pop("BIGQMT_CLIENT_CONFIG_MODULE", None)
-        client = _client()
+        # load_client_config() falls back to the repo's real (gitignored)
+        # private config module when the env var is unset; a developer box
+        # that disables the FormulaServer fastpath there would leak that
+        # choice into "no config" and flip this default. The default under
+        # test is the constructor's, so no config module may load at all.
+        import unittest.mock
+
+        with unittest.mock.patch(
+            "bigqmt_signal_trader.xtquant_compat.DEFAULT_CLIENT_CONFIG_MODULES", ()
+        ):
+            client = _client()
 
         self.assertTrue(client.local_cache_config["enabled"])
         self.assertFalse(client.full_tick_cache_config["enabled"])

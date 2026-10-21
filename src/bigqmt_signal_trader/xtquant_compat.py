@@ -312,6 +312,20 @@ def _build_quote_push_channel(client):
     if transport_name in ("zmq",):
         address = _quote_push_zmq_address(client)
         return ZmqQuotePushChannel(connect_address=address)
+    if transport_name in ("pipe",):
+        # #408: the events pipe path derives from the RPC pipe block exactly
+        # as the server derives it -- no discovery needed. An explicit redis
+        # block keeps winning (config is an opt-in): the pipe channel is the
+        # no-redis default precisely because a named pipe is not a socket and
+        # cannot trip the connection-killing sandbox the gate guards.
+        if not getattr(client, "_redis_explicit", False):
+            from .transports.pipe_push_channel import (
+                PipeQuotePushChannel, pipe_events_path,
+            )
+
+            pipe_config = dict(getattr(client, "pipe_config", {}) or {})
+            address = pipe_events_path(pipe_config.get("pipe_name"), client.account_id)
+            return PipeQuotePushChannel(connect_address=address)
     if (transport_name not in ("redis", "", "default")
             and not getattr(client, "_redis_explicit", True)):
         raise RuntimeError(
@@ -931,6 +945,14 @@ def _digits_only(value):
     return "".join(ch for ch in str(value or "") if ch.isdigit())
 
 
+def _time_compare_digits(value):
+    """A 14-digit string so QMT timestamps compare chronologically."""
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    if not digits:
+        return ""
+    return digits[:14].ljust(14, "0")
+
+
 def _parse_qmt_stime(value):
     digits = _digits_only(value)
     if len(digits) >= 14:
@@ -1468,6 +1490,7 @@ class BigQmtRpcClient:
         ).lower()
         self.zmq_config = dict(merged_redis_config.get("zmq") or {})
         self.mysql_config = dict(merged_redis_config.get("mysql") or {})
+        self.pipe_config = dict(merged_redis_config.get("pipe") or {})
         self._transport_instance = None  # lazily built by _transport()
         # FormulaServer read fast-path. QMT's C++ quote service (port 58600)
         # answers reference/history reads in ~0.07ms without touching the QMT
@@ -2445,7 +2468,7 @@ class BigQmtXtData:
         return True
 
     def _backfill_pre_close(self, data, period, dividend_type,
-                            timeout_seconds=None, use_formula=True):
+                            timeout_seconds=None, use_formula=True, subscribe=None):
         """Fill an all-zero preClose from daily bars (#166).
 
         Big QMT answers preClose = 0.0 on every ``1w`` bar. The right value,
@@ -2483,7 +2506,7 @@ class BigQmtXtData:
                 # A filled row carries no real preClose and would be picked as
                 # a period's "first trading day" if it were returned (#167).
                 fill_data=False, timeout_seconds=timeout_seconds,
-                use_formula=use_formula, backfill_pre_close=False,
+                use_formula=use_formula, backfill_pre_close=False, subscribe=subscribe,
             )
         except Exception as exc:
             # Degrade to the terminal's answer. The bars themselves are good;
@@ -2539,7 +2562,7 @@ class BigQmtXtData:
 
     def _resynth_ongoing_multiday_bars(self, data, period, start_time,
                                        end_time, dividend_type,
-                                       timeout_seconds=None, use_formula=True):
+                                       timeout_seconds=None, use_formula=True, subscribe=None):
         """Rebuild the in-progress multi-day bar from the period's daily bars (#226).
 
         Big QMT synthesizes an ongoing 1w/1mon/1q/1hy/1y bar from the bars in
@@ -2628,7 +2651,7 @@ class BigQmtXtData:
                 start_time=first, end_time=today, count=-1,
                 dividend_type=dividend_type, fill_data=False,
                 timeout_seconds=timeout_seconds, use_formula=use_formula,
-                backfill_pre_close=False, resynth_ongoing_multiday=False,
+                backfill_pre_close=False, resynth_ongoing_multiday=False, subscribe=subscribe,
             )
         except Exception as exc:
             # The terminal's answer was good enough to serve; taking the whole
@@ -2894,7 +2917,7 @@ class BigQmtXtData:
             # rather than a copy of the zeros (#166).
             data = self._backfill_pre_close(
                 data, period=period, dividend_type=dividend_type,
-                timeout_seconds=timeout_seconds, use_formula=use_formula,
+                timeout_seconds=timeout_seconds, use_formula=use_formula, subscribe=subscribe,
             )
 
         if resynth_ongoing_multiday:
@@ -2903,7 +2926,7 @@ class BigQmtXtData:
             data = self._resynth_ongoing_multiday_bars(
                 data, period=period, start_time=start_time, end_time=end_time,
                 dividend_type=dividend_type, timeout_seconds=timeout_seconds,
-                use_formula=use_formula,
+                use_formula=use_formula, subscribe=subscribe,
             )
 
         cache = self._local_cache()
@@ -2911,8 +2934,8 @@ class BigQmtXtData:
             for code, df in data.items():
                 try:
                     cache.write(code, period, df, dividend_type=dividend_type)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.warning("local cache write failed code=%s period=%s: %s", code, period, exc)
         return data
 
     def get_local_data(
@@ -3485,6 +3508,44 @@ class BigQmtXtData:
         self._record_subscription(seq, {}, active=False)
         return 0
 
+    def unsubscribe_quotes(self, seqs):
+        """Batch-release whole-quote handles: one RPC, one topic re-sync (#418).
+
+        ``unsubscribe_quote`` per handle costs an RPC plus a subscriber
+        rebuild each -- a 26-handle exit paid 26 RPCs and 25 rebuilds and
+        took seconds. This releases only THIS client's named handles server-
+        side (shared combos stay up for their other subscribers;
+        quote_unsubscribe_all remains the last resort it was). Handles that
+        are K-line pollers keep their per-item semantics (they are local
+        threads, no RPC at all). Returns the server's report: released /
+        unknown / native_errors.
+        """
+        wanted = [s for s in (seqs or [])]
+        session_owned = []
+        session = self._quote_session
+        with self._bar_poller_lock:
+            pollers = []
+            for seq in wanted:
+                poller = self._bar_pollers.pop(seq, None)
+                if poller is not None:
+                    pollers.append((seq, poller))
+                elif session is not None and session.has_subscription(seq):
+                    session_owned.append(seq)
+        for seq, poller in pollers:
+            poller.stop()
+            self._record_subscription(seq, {}, active=False)
+        report = None
+        if session_owned and session is not None:
+            report = session.unsubscribe_quotes(session_owned)
+            for seq in session_owned:
+                self._record_subscription(seq, {}, active=False)
+        for seq in wanted:
+            if seq not in session_owned:
+                self._record_subscription(seq, {}, active=False)
+        if report is None:
+            report = {"released": [], "unknown": [], "native_errors": []}
+        return report
+
     def stop_all_subscriptions(self):
         """Stop every K-line poller this object owns. Daemon threads die with
         the process anyway; this is for tests and for callers that recycle a
@@ -3621,6 +3682,7 @@ class BigQmtXtData:
         if step <= 0:
             step = 300
         finished = 0
+        skipped_all = []
         for i in range(0, total, step):
             batch = codes[i:i + step]
             # QMT 的下载全局是「提交任务即返回」，数据在服务端异步落地
@@ -3644,6 +3706,7 @@ class BigQmtXtData:
                     # The RPC timeout for one pull is not the poll budget: a
                     # batch of 300 codes x 20k bars is a multi-second reply.
                     timeout_seconds=max(float(data_wait_seconds), 60.0),
+                    subscribe=False,  # Cache population must not allocate native subscriptions.
                     # 等的就是刚提交的那笔下载。heal 看到「还没落地」会把它原样
                     # 再提交一遍、睡 2 秒、再读——每轮如此，等待目标被反复推后，
                     # 单票冷启动必然打满 60 秒（#275）。轮询里的读不参与 heal。
@@ -3674,14 +3737,73 @@ class BigQmtXtData:
                     "downloaded for these codes" % (
                         period, start_time, end_time, server_download_error,
                         ",".join(missing)))
+            skipped = []
+            if start_time and ready < len(batch):
+                no_data = [code for code in batch
+                           if getattr((data or {}).get(code), "shape", (0,))[0] == 0]
+                skipped = self._download_skipped_dead_zone(
+                    no_data, period, start_time, end_time)
+                if skipped:
+                    skipped_all.extend(skipped)
+                    # #397: the terminal's injected download only appends from
+                    # its local last bar -- these windows ended before it, so
+                    # nothing was written even though the task was accepted.
+                    # Name them instead of reporting fake progress.
+                    log.warning(
+                        "download_history_data2 %s %s~%s: %d code(s) sit in the "
+                        "append-only dead zone (window ends before the terminal's "
+                        "local last bar; nothing was written for them). They are "
+                        "in 'skipped', not 'finished': %s",
+                        period, start_time, end_time, len(skipped),
+                        ",".join(skipped[:5]))
             for code in batch:
+                if code in skipped:
+                    continue
                 finished += 1
                 if callback is not None:
                     try:
                         callback({"finished": finished, "total": total, "stockcode": code})
                     except Exception:
                         pass
-        return {"finished": finished, "total": total}
+        result = {"finished": finished, "total": total}
+        if skipped_all:
+            result["skipped"] = skipped_all
+        return result
+
+    def _download_skipped_dead_zone(self, codes, period, start_time, end_time):
+        """Empty-poll codes that are in the append-only dead zone, not data-less.
+
+        #397: the terminal's injected download only appends from its local
+        last bar; a window ending BEFORE that bar is silently not written.
+        Telling that from a genuinely data-less code (suspended / delisted /
+        never downloaded -- the tolerance those were for) needs one tail read:
+        a code with later data is in the dead zone; a code with none is not.
+        Batched, count=1, heal off -- cheap, and read-only.
+        """
+        if not codes or not start_time:
+            return []
+        try:
+            tails = self.get_market_data_ex(
+                field_list=["close"], stock_list=list(codes), period=period,
+                count=1, dividend_type="none", fill_data=False,
+                heal=False, subscribe=False, timeout_seconds=60.0)
+        except Exception:
+            return []   # cannot tell: keep the old tolerant finish
+        end_digits = _time_compare_digits(end_time)
+        if not end_digits:
+            return []
+        skipped = []
+        for code in codes:
+            frame = (tails or {}).get(code)
+            if frame is None or getattr(frame, "shape", (0,))[0] == 0:
+                continue
+            try:
+                last_stamp = str(list(frame.index)[-1])
+            except Exception:
+                continue
+            if _time_compare_digits(last_stamp) > end_digits:
+                skipped.append(code)
+        return skipped
 
     def download_history_data(self, stock_code, period, start_time="", end_time="", incrementally=None, dividend_type="none"):
         return self.download_history_data2([stock_code], period, start_time, end_time, dividend_type=dividend_type)
@@ -4940,16 +5062,17 @@ class BigQmtXtTrader:
             redis_client = self._exec_events_redis_or_none()
             if redis_client is not None:
                 self._event_loop_redis(redis_client)
-            elif self._exec_transport_is_zmq():
+            elif self._exec_transport_uses_push_channel():
                 self._event_loop_push_channel()
             else:
-                # pipe / mysql 没有推送通道（redis 传输的 redis 宕了也是）——
+                # mysql 没有推送通道（redis 传输的 redis 宕了也是）——
                 # 查询 RPC 还通，就轮询合成回调（#372）；查询也连续失败时
                 # 它会自己退回来，外层重新探 redis。
                 self._event_loop_poll()
 
-    def _exec_transport_is_zmq(self):
-        return str(getattr(self.client, "transport_name", "redis") or "redis").lower() == "zmq"
+    def _exec_transport_uses_push_channel(self):
+        # zmq and pipe both carry exec events on their push channel (#76, #408).
+        return str(getattr(self.client, "transport_name", "redis") or "redis").lower() in ("zmq", "pipe")
 
     def _exec_events_redis_or_none(self):
         """A REACHABLE Redis client for the exec-event channels, or None.
@@ -5164,6 +5287,20 @@ class BigQmtXtTrader:
             m_dTotalAsset=_safe_float(total_asset, 0.0) if total_asset is not None else None,
             m_dMarketValue=_safe_float(market_value, 0.0) if market_value is not None else 0.0,
         )
+
+    def query_secu_account(self, account):
+        """query_stock_asset 的别名（#406）。
+
+        不在 xtquant 公开文档里，但光大 2.1.29 终端在下单校验与账户会话探测
+        链上会按属性名回调 trader 对象的 query_secu_account；缺这个属性时
+        AttributeError 直接把当前操作打断（实盘下单被迫人工兜底、清算后每
+        5 分钟一条报错）。账户信息探针要的就是这份资产答案
+        （cash / frozen / market_value / total_asset）。
+        """
+        return self.query_stock_asset(account)
+
+    def query_secu_account_async(self, account, callback=None):
+        return self._async_query(self.query_secu_account, account, callback)
 
     def _position_object(self, account_id, item):
         volume = _safe_int(item.get("volume"))

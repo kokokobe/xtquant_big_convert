@@ -74,11 +74,17 @@ def _kernel32():
             "zmq for cross-platform deployments." % os.name)
     from ctypes import wintypes
 
+    # 部分券商 QMT 内置 Python 3.6 的 ctypes.wintypes 缺 HANDLE/BOOL
+    # （#419 切 pipe 即 AttributeError）。Win32 HANDLE 是指针宽、BOOL 是
+    # 32 位有符号整型，用 c_void_p / c_int32 兜底，类型全的 build 不受影响。
+    handle_type = getattr(wintypes, "HANDLE", ctypes.c_void_p)
+    bool_type = getattr(wintypes, "BOOL", ctypes.c_int32)
+
     dll = ctypes.WinDLL("kernel32", use_last_error=True)
-    dll.CreateNamedPipeW.restype = wintypes.HANDLE
-    dll.CreateFileW.restype = wintypes.HANDLE
+    dll.CreateNamedPipeW.restype = handle_type
+    dll.CreateFileW.restype = handle_type
     # drain 模式要用它做非阻塞探测：有数据才 ReadFile，绝不在 adjust 线程上阻塞
-    dll.PeekNamedPipe.restype = wintypes.BOOL
+    dll.PeekNamedPipe.restype = bool_type
     return dll, wintypes
 
 
