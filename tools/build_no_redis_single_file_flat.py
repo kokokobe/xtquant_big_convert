@@ -609,12 +609,14 @@ def _load_local_config():
 try:
     _config = _load_local_config()
     BIGQMT_REDIS_CONFIG = getattr(_config, "BIGQMT_REDIS_CONFIG", {})
-    # Default is zmq (the historical no-redis wire). An explicit "shm" in the
-    # local config opts into the zero-TCP transport (2026-09-15) and is
-    # honored -- anything else keeps the zmq force so a typo cannot fall
-    # through to a redis attempt that would trip the terminal audit scan.
+    # Default is zmq (the historical no-redis wire). An explicit "shm"/"pipe"
+    # opts into a zero-TCP transport -- shm 2026-09-15 (mmap ring), pipe
+    # upstream 0.3.69 (named pipe) -- both named-kernel-object wires the
+    # terminal's 10s TCP audit cannot see, so both are honored. Anything
+    # else keeps the zmq force so a typo cannot fall through to a redis
+    # attempt that would trip the terminal audit scan.
     BIGQMT_REDIS_CONFIG = dict(BIGQMT_REDIS_CONFIG or {})
-    if str(BIGQMT_REDIS_CONFIG.get("transport") or "").lower() != "shm":
+    if str(BIGQMT_REDIS_CONFIG.get("transport") or "").lower() not in ("shm", "pipe"):
         BIGQMT_REDIS_CONFIG["transport"] = "zmq"
     # setdefault: an explicit False is the #183 drain opt-in, worth 4-6x lower
     # latency on zmq, and assignment overwrote it (#188).
