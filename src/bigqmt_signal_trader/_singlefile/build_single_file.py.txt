@@ -387,14 +387,20 @@ except Exception as account_config_error:
         _runtime.configure_runtime_account(account_id)
 
 try:
-    # The strategy owns the authoritative injected-function list.  Keeping a
-    # second tuple here dropped all three history-download globals from the
-    # generated entry, so RPC could read existing DATs but never supplement
-    # missing history (# single-file mount drift).
-    qmt_injected = _strategy.capture_qmt_injected_funcs(globals())
-    _runtime.bind_runtime_api(extra_funcs=qmt_injected or None)
-    if qmt_injected:
-        print("[bigqmt_shell] bound QMT-injected globals: %s" % sorted(qmt_injected))
+    # Same capture every mounted entry uses (#202): the strategy module owns
+    # the name list (_QMT_INJECTED_GLOBAL_FUNCS). The hand-copied tuple that
+    # used to live here had been stale since 0.2.12 -- it stopped at
+    # get_hkt_exchange_rate, so every single-file build silently shipped
+    # without the download globals (download_history_data /
+    # download_history_data2 / down_history_data), query_credit_account and
+    # the formula family.
+    qmt_extra = _strategy.capture_qmt_injected_funcs(globals())
+    _runtime.bind_runtime_api(
+        passorder_func=globals().get("passorder"),
+        cancel_func=globals().get("cancel"),
+        get_trade_detail_data_func=globals().get("get_trade_detail_data"),
+        extra_funcs=qmt_extra or None,
+    )
 except NameError:
     pass
 

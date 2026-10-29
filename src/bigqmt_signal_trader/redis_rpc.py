@@ -551,6 +551,28 @@ def to_jsonable(value):
             return str(value)
     if hasattr(value, "to_dict") and hasattr(value, "columns") and hasattr(value, "index"):
         try:
+            columns = value.columns
+            if getattr(columns, "nlevels", 1) > 1:
+                # Python 3.12 QMT terminals answer the multi-stock forms of
+                # get_financial_data / get_top10_share_holder / get_market_data
+                # with a MultiIndex DataFrame where pandas.Panel used to be
+                # (pandas removed Panel in 1.0; the 3.12 runtime ships 3.0).
+                # reset_index()/to_dict below would flatten the tuple column
+                # labels into strings -- "('000002.SZ', 'close')" -- and the
+                # client would rebuild a frame it cannot index by code. Slice
+                # by the first level instead and reuse the Panel envelope,
+                # whose client rebuild is {code: DataFrame}: the same
+                # df[code] sub-table shape both pandas generations serve.
+                codes = list(columns.get_level_values(0).unique())
+                return {
+                    "__bigqmt_type__": "Panel",
+                    "items": [str(code) for code in codes],
+                    "major_axis": [str(item) for item in list(value.index)],
+                    "minor_axis": [
+                        str(item) for item in list(columns.get_level_values(1).unique())
+                    ],
+                    "data": {str(code): to_jsonable(value[code]) for code in codes},
+                }
             frame = value.reset_index()
             return {
                 "__bigqmt_type__": "DataFrame",

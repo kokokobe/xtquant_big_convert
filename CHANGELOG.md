@@ -9,6 +9,97 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [0.3.78] - 2026-10-27
+
+### 修复
+
+- **同机零依赖传输：drain 模式延迟应答不再可能串到别的连接（#436）**：延迟应答
+  原先按裸句柄值写回——等待方超时断开后，该值可能被回收给一条新连接，旧应答会
+  落到新客户端手里。现在每条连接登记身份 token，应答凭 token 认连接（token 不符
+  即连接已亡：丢弃并记日志）；客户端另加 request_id 核对兜底，串线的应答响亮报错
+  而不是被当成结果。
+- **同机零依赖传输：stop 与 accept 线程的竞态（#436）**：stop 现在先解除
+  ConnectNamedPipe 阻塞、等待 accept 线程退出（限时 5s）、再做二次清扫——快照之后
+  竞态新建的实例不再残留；重跑时同名旧服务实例会被新实例先行停止，客户端不会再
+  连上死实例。注：实现中途把服务注册表锁改为可重入——start 内调 previous.stop 与
+  stop 自注销在同一把锁上同线程重入，非重入锁直接死锁。
+## [0.3.77] - 2026-10-27
+
+### 修复
+
+- **NoopPositionSyncSink 快照无界增长（#441，内存泄漏）**：非 redis 传输回落到
+  Noop sink，publish() 每次追加、永不清理——app.tick() 每个 adjust 拍发布一次
+  （约 10 次/秒），报告者终端实测约 1MB/s 私有内存增长，直到页面文件吃满 C 盘。
+  改为原地保留最新一条（外部引用不变，src 内无历史读取方）。redis 传输用真
+  sink（带 TTL 发布）不受影响。
+## [0.3.76] - 2026-10-27
+
+### 修复
+
+- **信用账户 23/24 提交时翻译为担保品 opType 33/34**：MiniQMT 语义里 CREDIT_BUY/SELL
+  就是 23/24（担保品买卖），但 passorder 的 23/24 是普通买卖、33/34 才是担保品。
+  2.0.8 终端对信用账户的 23/24 宽容地按担保品成交；2.1.33 走普通买卖路径，订单
+  静默不进系统——passorder 返回但无委托行，结算终点报 submitted but order not
+  found（2026-10-27 实测：同参数 opType 改 34 即正常落委托列表带合同号）。现在
+  submit() 对 CREDIT 账户的 23/24 送 33/34，普通账户保持 23/24，两融 27-32 与
+  专项 70-75 翻译不变；客户端读回侧本就把 33/34 译回 23/24，往返对称。
+- **单文件外壳改用 capture_qmt_injected_funcs 捕获 QMT 全局函数**：手抄名单自
+  0.2.12 起停在 get_hkt_exchange_rate，download_history_data /
+  download_history_data2 / down_history_data、query_credit_account 与公式族在
+  所有单文件构建里都没绑定——download RPC 报 no download channel，终端已有
+  数据时被读到的行盖住像下载成功。两个构建器（b64 与 flat）同步改为从策略模块
+  的唯一名单捕获，_singlefile 打包副本同步；反手抄测试覆盖单文件模板。
+
+## [0.3.75] - 2026-10-26
+
+### 修复
+
+- **Python 3.12 终端多股票财务/十大股东返回形状兼容**：3.12 运行时（pandas 3）下
+  ContextInfo 的 get_financial_data / get_top10_share_holder / get_market_data 多股票
+  场景由 pandas.Panel 改为 MultiIndex DataFrame（Panel 自 pandas 1.0 起移除）。旧
+  序列化分支对 MultiIndex 走 reset_index，元组列名被拍平成字符串——客户端拿到
+  "('000002.SZ', 'close')" 这样的列，无法按代码取子表（2.1.33 实盘实测）。现在识别
+  MultiIndex 列后按第一级拆分、复用既有 Panel 信封，客户端零改动重建为
+  {代码: DataFrame}——与新旧两代 pandas 都服务的 df[代码] 子表形状一致。单股票
+  路径不受影响（原本就是普通 DataFrame）。
+
+## [0.3.74] - 2026-10-26
+
+### 修复
+
+- **get_local_data 盘中补回缺失的当日形成日线**（#226/#307 家族的 1d 情形）：
+  客户端缓存在当日开盘前写下的帧整天原样返回，最后一根停在上一个交易日——
+  download_history_data2 只更新服务端数据，从不刷新客户端缓存。现在读取时若
+  最后一根早于当日且请求窗口覆盖今天（交易日 09:15..15:05），当日形成 bar 从
+  实时日线读取补回到返回帧（不回写缓存）。守卫与降级与多日周期补救一致：实时
+  读取失败或为空时保留原答案并告警一次；历史窗口（end_time 早于今天）不追加。
+  2.1.33 终端实测：旧版 54 根止于上一交易日，修复版 55 根含当日盘中部分量。
+
+## [0.3.73] - 2026-10-24
+
+### 文档与测试
+
+- 更新日志与传输文档按既有口径隐去同机传输名（仅措辞，不改变任何运行时行为）。
+- **每线程连接归属断言改为全部连接同时在线采样**（#431 后续）：句柄随线程退出即时
+  关闭后，内核句柄值会被后建连接回收复用，旧的跨时间裸值比较把复用误判成共享
+  （全量复跑偶发 `5 != 6`）。改为 barrier 等 6 条连接同时活着再采样，共享句柄的实现
+  仍会露出 6 个相同值，测试牙齿不变。修正后连跑 20 次稳定，全量 2642 绿。
+
+## [0.3.72] - 2026-10-23
+
+### 修复
+
+- **按线程建的传输连接随线程退出释放**（#431，@erlou96 报告）。客户端每条线程第一次
+  RPC 时自建一条连接，但连接句柄只随进程退出回收：客户端每死一条线程，服务端白留一条连接
+  （background 模式还搭一个工作线程），churn 场景一路积到实例上限后新连接永远建不成——
+  报告里的「内存溢出」实际是服务端的线程/句柄耗尽。现在每条连接按 `(ident, token)` 注册，
+  线程退出时由 thread-local finalizer 即时关闭，新建连接前再兜底清扫死线程残留；ident 与
+  句柄值都会被系统回收复用，释放必须 token 全等，不会错杀复用位上的活连接。
+- **`trader.stop()` 关闭底层 RPC transport**（#431 同案）。原来只排干异步单、停事件线程，
+  transport 实例活到进程退出，守规矩的单线程客户端一样泄漏一条连接。新增
+  `BigQmtRpcClient.close()`（幂等，再使用时惰性重建），`BigQmtXtTrader.stop()` 调用它。
+  实盘（lemo 同机零依赖部署，0.3.71 桥）：6 线程 churn 后注册表零残留，`stop()` 后连接全关。
+
 ## [0.3.71] - 2026-10-20
 
 ### 修复
@@ -30,15 +121,15 @@
   `xtdata.unsubscribe_quotes(seqs)`：本地表一次移除、一次 RPC、一次 topic 重同步；服务端
   只释放本客户端的命名引用（共享组合的同机其它订阅者不受影响，`quote_unsubscribe_all`
   维持最后手段语义不变），报告 `{released, unknown, native_errors}`——未知 id 与原生
-  退订异常点名上报不再吞掉；replay 快照后已释放的句柄不再被订回。实盘（pipe 部署）：
+  退订异常点名上报不再吞掉；replay 快照后已释放的句柄不再被订回。实盘（同机零依赖部署）：
   5 订阅批量退订 282ms 完成、服务端组合清零。
 
 ## [0.3.69] - 2026-10-19
 
 ### 修复
 
-- **pipe 传输在缺 `ctypes.wintypes.HANDLE`/`BOOL` 的券商内置 Python 上直接可用**（#419，
-  @vx0532 报告）：部分 QMT 内置 3.6 裁掉了这两个类型，切管道即 AttributeError。
+- **同机零依赖传输在缺 `ctypes.wintypes.HANDLE`/`BOOL` 的券商内置 Python 上直接可用**（#419，
+  @vx0532 报告）：部分 QMT 内置 3.6 裁掉了这两个类型，启用即 AttributeError。
   以 c_void_p / c_int32 兜底（与原生同类同宽），完整 build 零变化。
 - **FileIO 禁令沙箱里 loader 的真实错误不再被 UnboundLocalError 掩盖**（#420，
   @yuchiwang 报告）：`open()` 被拒时 `source` 从未赋值，token 检查反手抛
@@ -55,15 +146,15 @@
   缺失/冲突为 0.45/0.73ms，均无 DataError。禁用/失败的 EVAL 回退路径及单读仍可能慢。
   升级同步完整包并 reload（单文件部署重新生成）；无需迁移，完整回滚仍可读取新写入
   的身份记录。Lua/Python 内部回复须同步更新，避免手工混搭；回滚旧版会恢复性能问题。
-- **pipe 部署的 RPC handlers 仍会拨 58610，QMT 弹 `非法IP:127.0.0.1:58610` 并冻结策略线程**：
+- **无 socket 部署的 RPC handlers 仍会拨 58610，QMT 弹 `非法IP:127.0.0.1:58610` 并冻结策略线程**：
   `_build_rpc_service` 为 handlers 单独构造了一个 `BigQmtMarketDataProvider`，没有像
   `adapter_factory.build_app` 那样按 `transport` 传入 `native_xtdata_enabled`，于是构造器默认的
   `True` 生效。`get_instrument_detail` 走原生优先的 `get_instrument`，加载 QMT 自带 xtdata SDK 后
   `get_client()` 拨 SDK `xtdata.ini` 里的 `127.0.0.1:58610`；终端把这次外连判为非法，弹模态警告并
   卡住 QMT 主线程，后续 K 线/行情/资产/持仓/委托请求全部超时（客户端显示 `rpc failed` 空错误）。
   现在 handlers 与下载补种的 provider 都按 `rpc.native_xtdata_enabled` 显式覆盖、否则跟随
-  `transport != "pipe"`，与 `adapter_factory` 同一规则；补 `test_socket_gates` 覆盖 helper 规则、
-  pipe 默认关闭和显式覆盖。已在 QMT（Wine）终端用弹窗、终端日志与 12:18 那次 RPC 时间线定位；
+  `transport` 非该模式，与 `adapter_factory` 同一规则；补 `test_socket_gates` 覆盖 helper 规则、
+  默认关闭和显式覆盖。已在 QMT（Wine）终端用弹窗、终端日志与 12:18 那次 RPC 时间线定位；
   修复后的终端复验待做。
 
 ## [0.3.68] - 2026-10-15
@@ -85,12 +176,12 @@
   避免 QMT 内置 Redis 响应过滤器拒绝读取含股票代码的 JSON。查询、执行回调、重复 remark
   检查及 `probe_order_identity` 统一读取；被拦截的旧 JSON 在 Redis 内原子迁移，保留内容和
   剩余 TTL。Redis 禁用 EVAL 时保留原记录并报告诊断错误。
-- **纯 pipe 等无 Redis 部署的重启恢复**：下单前同步追加本地身份 journal，启动时按账户和
+- **无 Redis 部署的重启恢复**：下单前同步追加本地身份 journal，启动时按账户和
   账户类型恢复七天内的策略归属；remark 与委托参数保持原值。写入失败通过日志和
   `probe_order_identity.local_persistence_error` 报告。默认保存在 QMT `python/state/order_identity`
   下，可用 `BIGQMT_ORDER_IDENTITY_DIR` 指定稳定目录。部署包含策略文件，须重启策略一次；
   已过期或从未持久化的历史映射无法凭空恢复。已通过隔离 Redis、进程重启及沙箱兼容测试。
-  2026-10-15 已在国金 QMT 的纯 pipe、无 Redis 模式用真实委托验证：策略重启后策略名和
+  2026-10-15 已在国金 QMT 的无 Redis 模式用真实委托验证：策略重启后策略名和
   备注保持原值，持久化无错误（测试单已撤、成交 0）。QMT 内 Redis 旧值迁移路径尚待实测。
 
 ## [0.3.66] - 2026-10-13

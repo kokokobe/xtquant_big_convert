@@ -1557,6 +1557,24 @@ class BigQmtRpcClient:
             )
         return self._transport_instance
 
+    def close(self):
+        """Release the swappable transport's connections, if one was built.
+
+        The transport is built lazily and otherwise lives until process exit:
+        every per-thread pipe connection it opened stays up, and a pipe
+        connection costs the server a worker thread each (#431). Called by
+        ``BigQmtXtTrader.stop()``; xtdata-only clients that want the same
+        teardown can call it directly. Safe to call more than once -- the
+        transport is rebuilt lazily if the client is used again afterwards.
+        """
+        transport = self._transport_instance
+        self._transport_instance = None
+        if transport is not None:
+            try:
+                transport.stop()
+            except Exception:
+                pass
+
     def _formula_router(self):
         """Lazily build the FormulaServer router. Never raises — a router that
         cannot be built simply means every read goes over RPC."""
@@ -1957,6 +1975,7 @@ RESYNTH_PERIOD_STARTS = {
     "1y": _year_start_label,
 }
 _RESYNTH_NOTICE = {"shown": False}
+_DAILY_RESCUE_NOTICE = {"shown": False}
 
 
 def _in_trading_session(now):
@@ -2685,6 +2704,81 @@ class BigQmtXtData:
             self._notice_resynth_ongoing(period, rebuilt + appended, appended)
         return data
 
+    def _rescue_ongoing_daily_bar(self, data, period, end_time, dividend_type,
+                                  timeout_seconds=None):
+        """Append today's forming 1d bar when the read stops at the previous
+        trading day (#226/#307 family, the 1d case).
+
+        The live daily read carries today's partial bar mid-session (measured
+        on 2.1.33 intraday), but two read paths lose it: a client-cache frame
+        written before today's session -- nothing between
+        download_history_data2 and this read refreshes the cache -- and, on
+        some terminals, a local-store read right after an incremental
+        download. Same guards as the multiday resynth (weekday inside
+        09:15..15:05, a request whose window still covers today) and the same
+        degrade: a failed or empty live read keeps the original answer and
+        warns once. The appended row lives in the returned frame only; it is
+        never written back into the cache.
+        """
+        if str(period or "") != "1d" or not isinstance(data, dict) or not data:
+            return data
+        now = _now()
+        if not _in_trading_session(now):
+            return data
+        today = now.strftime("%Y%m%d")
+        end_day = _digits_only(str(end_time or ""))[:8]
+        if end_day and end_day < today:
+            return data          # a pure-history window never asked for today
+        wanted = []
+        for code, frame in data.items():
+            labels = _frame_bar_labels(frame) if frame is not None else None
+            if not labels or str(labels[-1]) < today:
+                wanted.append(code)
+        if not wanted:
+            return data
+        try:
+            live = self.get_market_data_ex(
+                field_list=["open", "high", "low", "close", "volume", "amount"],
+                stock_list=wanted, period="1d",
+                start_time=today, end_time=today, count=-1,
+                dividend_type=dividend_type, fill_data=False,
+                timeout_seconds=timeout_seconds, use_formula=False,
+                backfill_pre_close=False, resynth_ongoing_multiday=False,
+            )
+        except Exception as exc:
+            # The local answer was good enough to serve; taking the whole
+            # read down over the appended bar would be the worse bug.
+            log.warning("ongoing 1d bar rescue skipped: %s", exc)
+            return data
+        appended = 0
+        for code in wanted:
+            live_frame = live.get(code) if isinstance(live, dict) else None
+            summary = self._sum_daily_bars(live_frame, today, today)
+            if summary is None:
+                continue          # no live bar yet (pre-open): nothing to add
+            if self._append_ongoing_bar(data[code], today, summary):
+                appended += 1
+        if appended:
+            self._notice_1d_rescue(appended)
+        return data
+
+    @staticmethod
+    def _notice_1d_rescue(appended):
+        """Say once that today's forming daily bar was appended here."""
+        if _DAILY_RESCUE_NOTICE["shown"]:
+            return
+        _DAILY_RESCUE_NOTICE["shown"] = True
+        try:
+            log.info(
+                "%d forming 1d bar(s) missing from the local answer were "
+                "appended from the live daily read (#226/#307 family, the 1d "
+                "case): a client-cache frame cached before the session or a "
+                "store read right after an incremental download stops at the "
+                "previous trading day. Pass resynth_ongoing_multiday=False to "
+                "serve the raw answer.", appended)
+        except Exception:
+            pass
+
     @staticmethod
     def _last_bar_disagrees(frame, summary):
         """True when the last bar's volume differs from the daily sum.
@@ -2995,6 +3089,19 @@ class BigQmtXtData:
                         end_time=end_time, dividend_type=dividend_type,
                     )
                 data = payload.get(single) if single is not None else payload
+            if resynth_ongoing_multiday and str(period or "") == "1d":
+                # The 1d twin of the block above: a forming daily bar the
+                # local answer dropped is appended from the live read. The
+                # single-code frame gets the same wrap/unwrap treatment.
+                single = None
+                payload = data
+                if not isinstance(data, dict) and codes:
+                    single = codes[0]
+                    payload = {single: data}
+                payload = self._rescue_ongoing_daily_bar(
+                    payload, period=period, end_time=end_time,
+                    dividend_type=dividend_type)
+                data = payload.get(single) if single is not None else payload
             if isinstance(data, dict):
                 return {code: _ensure_kline_columns(frame, field_list=field_list, period=period)
                         for code, frame in data.items()}
@@ -3022,6 +3129,13 @@ class BigQmtXtData:
                             field_list=fields, period=period),
                         fields,
                     )
+        if result and resynth_ongoing_multiday and str(period or "") == "1d":
+            # The cache branch is where a stale frame bites: a file written
+            # before today's session serves all day with the last bar at the
+            # previous trading day, and downloads never refresh it.
+            result = self._rescue_ongoing_daily_bar(
+                result, period=period, end_time=end_time,
+                dividend_type=dividend_type)
         return result
 
     @staticmethod
@@ -4812,6 +4926,13 @@ class BigQmtXtTrader:
         if thread is not None and thread.is_alive():
             thread.join(1.0)
         self._event_thread = None
+        # The trader built its client in __init__, so it owns the transport
+        # too: without this, every per-thread pipe connection lives until
+        # process exit, and each one costs the server a worker thread (#431).
+        try:
+            self.client.close()
+        except Exception:
+            pass
         return 0
 
     def _start_event_listener(self):
