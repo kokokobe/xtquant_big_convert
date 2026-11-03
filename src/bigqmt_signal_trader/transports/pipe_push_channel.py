@@ -10,16 +10,23 @@ ever sees concurrent read+write.
 
 Same publish/subscriber interface as ZmqQuotePushChannel, so exec events
 (order/trade/order_error/cancel_error) and whole-quote frames ride it
-unchanged. The publisher keeps one handle per connected client and fan-outs
-each frame under that handle's write lock; a write error means the client
-went away and the handle is dropped. The subscriber loops a blocking
-ReadFile with reconnect, filters topics by prefix (zmq SUBSCRIBE
-semantics), and owns the same per-subscriber stop Event as the zmq channel
-(#403): a join timeout can never leak a zombie that a later start revives.
+unchanged. The subscriber loops a blocking ReadFile with reconnect, filters
+topics by prefix (zmq SUBSCRIBE semantics), and owns the same per-subscriber
+stop Event as the zmq channel (#403): a join timeout can never leak a zombie
+that a later start revives.
+
+任务13（有界隔离）：publish 线程只做一次 JSON 编码并入每客户端有界
+队列（帧数+字节双上限），绝不执行 WriteFile、绝不等待；每客户端一个
+独立 writer 线程做带截止时间的 WriteFile，watchdog 用 CancelIoEx 取消
+超时在途写；队列满/写超时关闭该连接并计入 backpressure_status——
+慢读者不可能阻塞 QMT 回调线程。每帧携带 meta={stream_epoch,stream_seq}
+（epoch 为启动生成的 opaque 字符串，seq 每原始发布递增），旧读者忽略
+meta 不受影响。
 """
 
 import ctypes
 import json
+import queue
 import threading
 import time
 
@@ -54,14 +61,38 @@ def pipe_events_path(name=DEFAULT_PIPE_NAME, account_id=""):
     return pipe_path(str(name or DEFAULT_PIPE_NAME) + "_events", account_id)
 
 
+class _Client(object):
+    """One connected writer: its pipe handle, bounded queue and thread."""
+
+    __slots__ = ("handle", "lock", "queue", "queue_bytes", "thread",
+                 "disconnected", "writing_since")
+
+    def __init__(self, handle, queue_capacity):
+        self.handle = handle
+        self.lock = threading.Lock()
+        self.queue = queue.Queue(maxsize=queue_capacity)
+        self.queue_bytes = 0
+        self.thread = None
+        self.disconnected = False
+        self.writing_since = 0.0
+
+
 class PipeQuotePushChannel(object):
     """Named-pipe push channel: bind_address publishes, connect_address subscribes."""
 
     def __init__(self, bind_address=None, connect_address=None,
-                 print_prefix="[bigqmt_quote_push]"):
+                 print_prefix="[bigqmt_quote_push]",
+                 queue_capacity=256, write_timeout_seconds=1.0,
+                 max_frame_bytes=1048576, max_clients=8,
+                 max_client_queue_bytes=8388608):
         self.bind_address = bind_address
         self.connect_address = connect_address
         self.print_prefix = print_prefix
+        self.queue_capacity = max(1, int(queue_capacity))
+        self.write_timeout_seconds = float(write_timeout_seconds)
+        self.max_frame_bytes = max(1, int(max_frame_bytes))
+        self.max_clients = max(1, int(max_clients))
+        self.max_client_queue_bytes = max(1, int(max_client_queue_bytes))
         self._running = False
         self._accept_thread = None
         self._sub_handles = {}
@@ -72,6 +103,16 @@ class PipeQuotePushChannel(object):
         self.subscriber_join_seconds = 1.0
         self._client_handle = None
         self._client_handle_lock = threading.Lock()
+        # -- 任务13：有界发布状态 --------------------------------------
+        self._clients = {}          # handle -> _Client
+        self._stream_epoch = ""
+        self._stream_seq = 0
+        self._test_write_fn = None  # 私有测试接缝，不导出给 RPC
+        self._overflows = 0
+        self._rejected_oversize = 0
+        self._write_timeouts = 0
+        self._disconnected_clients = 0
+        self._watchdog_thread = None
 
     def _dll(self):
         return _kernel32()
@@ -84,11 +125,24 @@ class PipeQuotePushChannel(object):
         if not self.bind_address:
             raise ValueError("bind_address is required to start a publisher")
         self._running = True
+        import uuid
+        self._stream_epoch = uuid.uuid4().hex
+        self._stream_seq = 0
+        self._overflows = 0
+        self._rejected_oversize = 0
+        self._write_timeouts = 0
+        self._disconnected_clients = 0
+        self._test_client = None
         thread = threading.Thread(
             target=self._accept_loop, name="bigqmt-quote-push-pipe-accept")
         thread.daemon = True
         thread.start()
         self._accept_thread = thread
+        watchdog = threading.Thread(
+            target=self._watchdog_loop, name="bigqmt-quote-push-pipe-watchdog")
+        watchdog.daemon = True
+        watchdog.start()
+        self._watchdog_thread = watchdog
 
     def _accept_loop(self):
         dll, _ = self._dll()
@@ -119,33 +173,161 @@ class PipeQuotePushChannel(object):
                 except Exception:
                     pass
                 return
+            self._register_client(handle)
+
+    def _register_client(self, handle):
+        """每个连接一个有界队列 + 独立 writer 线程；超 max_clients 拒绝。"""
+        with self._sub_handles_lock:
+            if len(self._clients) >= self.max_clients:
+                # 超额连接：立即关闭，不接受（登记仅发生在成功分支）
+                try:
+                    self._dll()[0].CloseHandle(handle)
+                except Exception:
+                    pass
+                return
+            client = _Client(handle, self.queue_capacity)
+            self._clients[handle] = client
+            self._sub_handles[handle] = threading.Lock()
+        client.thread = threading.Thread(
+            target=self._writer_loop, args=(client,),
+            name="bigqmt-quote-push-pipe-writer")
+        client.thread.daemon = True
+        client.thread.start()
+
+    def _writer_loop(self, client):
+        # 仅由 disconnected（含 stop() 置位）终止：_install_test_writer 可在
+        # start_publisher 之前注册，writer 需存活到 stop，不随 _running 退出
+        while not client.disconnected:
+            try:
+                payload = client.queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if payload is None or client.disconnected:
+                break  # None = stop() 哨兵：排空后的有界退出
+            client.queue_bytes -= len(payload)
+            ok = self._write_frame(client, payload)
+            if not ok:
+                break
+        self._drop_client(client)
+
+    def _write_frame(self, client, payload):
+        """带截止时间的一次写出；超时由 watchdog 用 CancelIoEx 取消。"""
+        if client.disconnected:
+            return False
+        client.writing_since = time.time()
+        try:
+            if client.handle is None:
+                # 合成测试客户端：写函数可阻塞，watchdog 不适用
+                return bool(self._test_write_fn(payload))
+            dll, wintypes = self._dll()
+            written = wintypes.DWORD()
+            with client.lock:
+                ok = dll.WriteFile(client.handle, payload, len(payload),
+                                   ctypes.byref(written), None)
+            return bool(ok)
+        except Exception:
+            return False
+        finally:
+            client.writing_since = 0.0
+
+    def _install_test_writer(self, fn):
+        """测试接缝：注册一个无句柄合成客户端，其 writer 调用 fn 而非
+        WriteFile——不经真实管道即可验证背压/断开语义（不导出给 RPC）。"""
+        self._test_write_fn = fn
+        if getattr(self, "_test_client", None) is not None:
+            return
+        client = _Client(None, self.queue_capacity)
+        self._test_client = client
+        with self._sub_handles_lock:
+            self._clients[None] = client
+        client.thread = threading.Thread(
+            target=self._writer_loop, args=(client,),
+            name="bigqmt-quote-push-pipe-test-writer")
+        client.thread.daemon = True
+        client.thread.start()
+
+    def _watchdog_loop(self):
+        """写超时检测：CancelIoEx 取消在途 WriteFile，writer 落败即断开。"""
+        while self._running:
+            now = time.time()
             with self._sub_handles_lock:
-                self._sub_handles[handle] = threading.Lock()
+                clients = list(self._clients.values())
+            for client in clients:
+                started = client.writing_since
+                if client.handle is None:
+                    continue  # 合成客户端无在途 I/O 可取消
+                if started and now - started > self.write_timeout_seconds:
+                    self._write_timeouts += 1
+                    try:
+                        self._dll()[0].CancelIoEx(client.handle, None)
+                    except Exception:
+                        pass
+            time.sleep(0.05)
 
     def publish(self, topic, data):
+        """冻结一帧并入各客户端有界队列；不 WriteFile、不等待、不阻塞回调。
+
+        返回 False 表示本帧被拒（超尺寸）——队列满不假装完整，直接断开
+        慢读者并计入 backpressure_status。
+        """
         if not self._running:
-            return
+            return False
+        self._stream_seq += 1
         payload = json.dumps(
-            {"topic": str(topic), "data": data},
+            {"topic": str(topic), "data": data,
+             "meta": {"stream_epoch": self._stream_epoch,
+                      "stream_seq": self._stream_seq}},
             ensure_ascii=False, default=str).encode("utf-8")
-        dll, wintypes = self._dll()
+        if len(payload) > self.max_frame_bytes:
+            self._rejected_oversize += 1
+            return False
         with self._sub_handles_lock:
-            items = list(self._sub_handles.items())
-        dead = []
-        for handle, lock in items:
-            written = wintypes.DWORD()
-            with lock:
-                ok = dll.WriteFile(handle, payload, len(payload),
-                                   ctypes.byref(written), None)
-            if not ok:
-                dead.append(handle)
-        for handle in dead:
-            self._drop_handle(handle)
+            clients = list(self._clients.values())
+        if not clients:
+            return True  # 无订阅者 no-op（订阅侧负责打底/新鲜度检查）
+        for client in clients:
+            if client.disconnected:
+                continue
+            try:
+                client.queue.put_nowait(payload)
+                client.queue_bytes += len(payload)
+            except queue.Full:
+                self._overflows += 1
+                self._disconnect_client(client)
+        return True
+
+    def _disconnect_client(self, client):
+        """满队列/写失败：标记断开并取消在途 I/O，writer 自行收尾。"""
+        client.disconnected = True
+        self._disconnected_clients += 1
+        if client.handle is not None:
+            try:
+                self._dll()[0].CancelIoEx(client.handle, None)
+            except Exception:
+                pass
+
+    def _drop_client(self, client):
+        with self._sub_handles_lock:
+            self._clients.pop(client.handle, None)
+            self._sub_handles.pop(client.handle, None)
+        if client.handle is None:
+            return  # 合成客户端无句柄可关
+        try:
+            self._dll()[0].DisconnectNamedPipe(client.handle)
+        except Exception:
+            pass
+        try:
+            self._dll()[0].CloseHandle(client.handle)
+        except Exception:
+            pass
 
     def _drop_handle(self, handle):
         dll, _ = self._dll()
         with self._sub_handles_lock:
             self._sub_handles.pop(handle, None)
+            client = self._clients.pop(handle, None)
+        if client is not None:
+            client.disconnected = True
         try:
             dll.DisconnectNamedPipe(handle)
         except Exception:
@@ -154,6 +336,24 @@ class PipeQuotePushChannel(object):
             dll.CloseHandle(handle)
         except Exception:
             pass
+
+    def backpressure_status(self):
+        """背压可观测状态：溢出/超尺寸拒绝/写超时/断开数/在队帧数/客户端数。"""
+        with self._sub_handles_lock:
+            clients = list(self._clients.values())
+        queued = sum(c.queue.qsize() for c in clients)
+        queued_bytes = sum(c.queue_bytes for c in clients)
+        return {
+            "overflows": self._overflows,
+            "rejected_oversize": self._rejected_oversize,
+            "write_timeouts": self._write_timeouts,
+            "disconnected_clients": self._disconnected_clients,
+            "queued_frames": queued,
+            "queued_bytes": queued_bytes,
+            "clients": len(clients),
+            "stream_epoch": self._stream_epoch,
+            "stream_seq": self._stream_seq,
+        }
 
     def publisher_subscriber_count(self):
         """Connected clients right now (diagnostic)."""
@@ -306,6 +506,27 @@ class PipeQuotePushChannel(object):
         self._running = False
         self._stop_subscriber()
         if self.bind_address:
+            # 有界 flush：先让 writer 排空已入队帧（健康 writer 毫秒级），
+            # 限时 join 后才强制断开——stop 不丢健康队列里的帧，也不被慢写拖死
+            with self._sub_handles_lock:
+                clients = list(self._clients.values())
+            threads = []
+            for client in clients:
+                try:
+                    client.queue.put_nowait(None)
+                except queue.Full:
+                    pass
+                if client.thread is not None and client.thread.is_alive():
+                    threads.append(client.thread)
+            for thread in threads:
+                thread.join(1.0)
+            for client in clients:
+                client.disconnected = True
+                if client.handle is not None:
+                    try:
+                        self._dll()[0].CancelIoEx(client.handle, None)
+                    except Exception:
+                        pass
             try:
                 dll, _ = self._dll()
                 # Unblock the accept loop: ConnectNamedPipe only returns once
@@ -326,3 +547,7 @@ class PipeQuotePushChannel(object):
         if thread is not None and thread.is_alive():
             thread.join(1.0)
         self._accept_thread = None
+        watchdog = self._watchdog_thread
+        if watchdog is not None and watchdog.is_alive():
+            watchdog.join(0.5)
+        self._watchdog_thread = None
