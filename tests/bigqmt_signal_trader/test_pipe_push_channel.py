@@ -137,7 +137,9 @@ class PipePushChannelTest(unittest.TestCase):
 
     def test_large_frame_survives_the_buffer(self):
         # A whole-quote snapshot frame is far larger than one ReadFile chunk:
-        # the ERROR_MORE_DATA assembly must put it back together.
+        # the ERROR_MORE_DATA assembly must put it back together. The frame
+        # stays under the publisher's 1MiB cap (task 13 rejects beyond it by
+        # design) while still exceeding the per-read buffer.
         server, client = _pair()
         received = []
         done = threading.Event()
@@ -151,15 +153,15 @@ class PipePushChannelTest(unittest.TestCase):
             deadline = time.time() + 3.0
             while time.time() < deadline and server.publisher_subscriber_count() < 1:
                 time.sleep(0.05)
-            big = {"codes": ["%06d.SH" % i for i in range(20000)],
-                   "blob": "x" * (3 * 1024 * 1024)}
+            big = {"codes": ["%06d.SH" % i for i in range(4000)],
+                   "blob": "x" * (512 * 1024)}
             server.publish("big", big)
             self.assertTrue(done.wait(5.0), "large frame did not arrive")
         finally:
             client.stop()
             server.stop()
-        self.assertEqual(received[0]["blob"], "x" * (3 * 1024 * 1024))
-        self.assertEqual(len(received[0]["codes"]), 20000)
+        self.assertEqual(received[0]["blob"], "x" * (512 * 1024))
+        self.assertEqual(len(received[0]["codes"]), 4000)
 
     def test_stop_start_subscriber_lifecycle(self):
         # #403 lifecycle, pipe edition: stop + start with a changed topic set

@@ -7,6 +7,21 @@
 
 # Changelog
 
+## [0.3.79] - 2026-11-03
+
+### Added
+
+- 中频事件运行时任务13：`PipeQuotePushChannel` 发布侧有界隔离——publish 只做
+  一次 JSON 编并入每客户端有界队列（帧数 256 + 字节 8MiB 双上限），WriteFile
+  由每客户端独立 writer 执行，watchdog 以 CancelIoEx 取消超时在途写；
+  队列满/写超时断开该连接，`backpressure_status()` 暴露溢出/超尺寸/超时/
+  断开计数——慢读者不再可能阻塞 QMT 回调线程。
+- 每帧新增 `meta={stream_epoch, stream_seq}`（epoch 为启动 opaque UUID，
+  seq 每原始发布递增），旧读者忽略 meta 兼容；`max_frame_bytes=1MiB` 超限
+  帧拒绝并计数。
+- `stop()` 先有界排空已入队帧（健康 writer 毫秒级）再强制断开，不丢健康
+  队列里的帧也不被慢写拖死；`max_clients=8` 超额连接直接关闭。
+
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 ## [0.3.78] - 2026-10-27
