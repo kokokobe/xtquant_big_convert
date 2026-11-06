@@ -67,6 +67,14 @@ _MARKET_VALUE_FIELDS = (
     "market_value",
 )
 
+# Cash-flow facts on the ACCOUNT row (ThinkTrader data_structure.html, Account
+# object): 出入金净值 / 入金 / 出金. m_dCashIn's window (cumulative vs daily) is
+# undocumented; all three are carried so qplatform can cross-check. The QMT
+# spelling is documented, but not every terminal populates every field.
+_CASH_IN_FIELDS = ("m_dCashIn", "cash_in", "cashIn")
+_DEPOSIT_FIELDS = ("m_dDeposit", "deposit")
+_WITHDRAW_FIELDS = ("m_dWithdraw", "m_dWithdrawal", "withdraw")
+
 # Printed once per process when the frozen field is not found, listing what the
 # row actually carries. Guessing a field name and shipping it unverified is how
 # the order-direction bug happened; this makes the real name self-reporting.
@@ -324,6 +332,15 @@ class BigQmtPositionProvider:
         total_asset = _attr(row, ("m_dBalance", "m_dAsset", "total_asset", "asset"))
         frozen_cash = _attr(row, _FROZEN_CASH_FIELDS)
         market_value = _attr(row, _MARKET_VALUE_FIELDS)
+        cash_in = _float_or_none(_attr(row, _CASH_IN_FIELDS))
+        deposit = _float_or_none(_attr(row, _DEPOSIT_FIELDS))
+        withdraw = _float_or_none(_attr(row, _WITHDRAW_FIELDS))
+        if cash_in is None:
+            _report_missing_field("cash_in", row, _CASH_IN_FIELDS)
+        if deposit is None:
+            _report_missing_field("deposit", row, _DEPOSIT_FIELDS)
+        if withdraw is None:
+            _report_missing_field("withdraw", row, _WITHDRAW_FIELDS)
         if frozen_cash is None:
             _report_missing_field("frozen_cash", row, _FROZEN_CASH_FIELDS)
         if market_value is None and cash is not None and total_asset is not None:
@@ -339,4 +356,7 @@ class BigQmtPositionProvider:
             total_asset=float(total_asset) if total_asset is not None else None,
             frozen_cash=float(frozen_cash) if frozen_cash is not None else None,
             market_value=float(market_value) if market_value is not None else None,
+            cash_in=cash_in,
+            deposit=deposit,
+            withdraw=withdraw,
         )

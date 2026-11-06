@@ -57,5 +57,60 @@ class AssetSnapshotModelTest(unittest.TestCase):
         self.assertEqual(snapshot.withdraw, 2000.0)
 
 
+class QmtCollectionTest(unittest.TestCase):
+    def setUp(self):
+        position_bigqmt._missing_field_reported.clear()
+
+    def test_reads_cash_flow_fields_from_the_account_row(self):
+        provider = _provider(Row(
+            m_dAvailable=100.0, m_dBalance=1000.0,
+            m_dCashIn=8000.0, m_dDeposit=10000.0, m_dWithdraw=2000.0,
+        ))
+
+        asset = provider.get_asset("acct")
+
+        self.assertEqual(asset.cash_in, 8000.0)
+        self.assertEqual(asset.deposit, 10000.0)
+        self.assertEqual(asset.withdraw, 2000.0)
+
+    def test_accepts_negative_net_outflow(self):
+        provider = _provider(Row(m_dAvailable=100.0, m_dBalance=1000.0, m_dCashIn=-3000.0))
+
+        self.assertEqual(provider.get_asset("acct").cash_in, -3000.0)
+
+    def test_unreported_fields_stay_none(self):
+        provider = _provider(Row(m_dAvailable=100.0, m_dBalance=1000.0))
+        asset = provider.get_asset("acct")
+
+        self.assertIsNone(asset.cash_in)
+        self.assertIsNone(asset.deposit)
+        self.assertIsNone(asset.withdraw)
+
+    def test_missing_cash_in_reports_what_the_row_actually_has(self):
+        import io
+        import contextlib
+
+        provider = _provider(Row(m_dAvailable=100.0, m_dBalance=1000.0, m_dWhateverElse=1.0))
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            provider.get_asset("acct")
+        output = buffer.getvalue()
+
+        self.assertIn("cash_in not found", output)
+        self.assertIn("m_dWhateverElse", output)
+
+    def test_missing_field_is_reported_once_not_per_call(self):
+        import io
+        import contextlib
+
+        provider = _provider(Row(m_dAvailable=100.0, m_dBalance=1000.0))
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            for _ in range(5):
+                provider.get_asset("acct")
+
+        self.assertEqual(buffer.getvalue().count("cash_in not found"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
