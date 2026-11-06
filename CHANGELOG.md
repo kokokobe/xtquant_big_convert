@@ -7,6 +7,17 @@
 
 # Changelog
 
+## [0.3.80] - 2026-11-06
+
+### Added
+
+- ACCOUNT 行出入金三字段全链路透传：`m_dCashIn/m_dDeposit/m_dWithdraw` →
+  `AssetSnapshot.cash_in/deposit/withdraw` → RPC `get_asset` 线格式 / Redis
+  缓存字典 / `query_stock_asset` CompatObject（含 `m_dCashIn` 等别名）。
+  None = 终端未上报，严格区别于 0（qplatform 需区分"无出入金"与"未上报"）。
+  动机：qplatform 绩效页今日盈亏剔除相邻快照日净出入金
+  （spec `2026-11-06-cash-in-out-today-pnl-design.md`）。
+
 ## [0.3.79] - 2026-11-03
 
 ### Added
