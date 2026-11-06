@@ -5377,6 +5377,11 @@ class BigQmtXtTrader:
         total_asset = data.get("total_asset")
         frozen_cash = data.get("frozen_cash")
         market_value = data.get("market_value")
+        # Cash-flow facts (出入金). None = unreported; these never feed the
+        # market_value derivation or any arithmetic default.
+        cash_in = _safe_float(data.get("cash_in"), None)
+        deposit = _safe_float(data.get("deposit"), None)
+        withdraw = _safe_float(data.get("withdraw"), None)
         if market_value is None and cash is not None and total_asset is not None:
             # total_asset = cash(available) + frozen_cash + market_value. Older
             # servers send neither frozen_cash nor market_value; deriving without
@@ -5399,6 +5404,9 @@ class BigQmtXtTrader:
             frozen_cash=_safe_float(frozen_cash, 0.0) if frozen_cash is not None else 0.0,
             total_asset=_safe_float(total_asset, 0.0) if total_asset is not None else None,
             market_value=_safe_float(market_value, 0.0) if market_value is not None else 0.0,
+            cash_in=cash_in,
+            deposit=deposit,
+            withdraw=withdraw,
             # ===== 原生 xtquant 字段名别名（兼容 m_ 前缀访问）=====
             m_strAccountID=account_id,
             m_nAccountType=self._account_type_value(),
@@ -5407,6 +5415,9 @@ class BigQmtXtTrader:
             m_dFrozenCash=_safe_float(frozen_cash, 0.0) if frozen_cash is not None else 0.0,
             m_dTotalAsset=_safe_float(total_asset, 0.0) if total_asset is not None else None,
             m_dMarketValue=_safe_float(market_value, 0.0) if market_value is not None else 0.0,
+            m_dCashIn=cash_in,
+            m_dDeposit=deposit,
+            m_dWithdraw=withdraw,
         )
 
     def query_secu_account(self, account):

@@ -45,6 +45,10 @@ class RedisPositionSyncSink:
                 # fields as a live query_stock_asset.
                 "frozen_cash": getattr(snapshot.asset, "frozen_cash", None),
                 "market_value": getattr(snapshot.asset, "market_value", None),
+                # Cash-flow facts; None = terminal did not report (never 0).
+                "cash_in": getattr(snapshot.asset, "cash_in", None),
+                "deposit": getattr(snapshot.asset, "deposit", None),
+                "withdraw": getattr(snapshot.asset, "withdraw", None),
             },
             "positions": {
                 code: {

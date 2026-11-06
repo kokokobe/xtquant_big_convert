@@ -112,5 +112,83 @@ class QmtCollectionTest(unittest.TestCase):
         self.assertEqual(buffer.getvalue().count("cash_in not found"), 1)
 
 
+class FakeRedis:
+    def __init__(self):
+        self.kv = {}
+        self.streams = {}
+
+    def set(self, key, value):
+        self.kv[key] = value
+
+    def setex(self, key, ttl_seconds, value):
+        self.kv[key] = value
+
+    def xadd(self, key, fields, maxlen=None, approximate=None):
+        self.streams.setdefault(key, []).append(fields)
+        return b"1-0"
+
+    def publish(self, key, value):
+        return 1
+
+
+class RpcSerializationTest(unittest.TestCase):
+    def test_to_jsonable_carries_cash_flow_fields_over_the_wire(self):
+        snapshot = AssetSnapshot("acct", 100.0, 1000.0, cash_in=8000.0, deposit=10000.0, withdraw=2000.0)
+
+        payload = to_jsonable(snapshot)
+
+        self.assertEqual(payload["cash_in"], 8000.0)
+        self.assertEqual(payload["deposit"], 10000.0)
+        self.assertEqual(payload["withdraw"], 2000.0)
+
+
+class PositionSyncTest(unittest.TestCase):
+    def test_cached_snapshot_includes_cash_flow_fields(self):
+        redis_client = FakeRedis()
+        RedisPositionSyncSink(redis_client).publish(
+            AccountSnapshot(
+                account_id="acct",
+                asset=AssetSnapshot("acct", 100.0, 1000.0, cash_in=8000.0),
+                positions={"600000.SH": PositionSnapshot("600000.SH", 100, 100, 10.0, "PF")},
+                reason="test",
+                updated_at=_dt.datetime(2026, 7, 1, 9, 31),
+            )
+        )
+
+        payload = json.loads(redis_client.kv["bigqmt:positions:acct"])
+
+        self.assertEqual(payload["asset"]["cash_in"], 8000.0)
+        self.assertIsNone(payload["asset"]["deposit"])
+
+
+class ClientSurfaceTest(unittest.TestCase):
+    def _trader(self, response):
+        trader = BigQmtXtTrader(account_id="acct")
+        trader.client.call = lambda method, params=None, account_id=None, **kw: response
+        return trader
+
+    def test_cash_flow_fields_are_exposed_with_m_d_aliases(self):
+        asset = self._trader({
+            "cash": 100.0, "total_asset": 1000.0,
+            "cash_in": 8000.0, "deposit": 10000.0, "withdraw": 2000.0,
+        }).query_stock_asset(StockAccount("acct"))
+
+        self.assertEqual(asset.cash_in, 8000.0)
+        self.assertEqual(asset.deposit, 10000.0)
+        self.assertEqual(asset.withdraw, 2000.0)
+        self.assertEqual(asset.m_dCashIn, 8000.0)
+        self.assertEqual(asset.m_dDeposit, 10000.0)
+        self.assertEqual(asset.m_dWithdraw, 2000.0)
+
+    def test_server_without_cash_flow_fields_yields_none_not_zero(self):
+        """A server predating this field must not turn 'unreported' into 0."""
+        asset = self._trader({"cash": 100.0, "total_asset": 1000.0}).query_stock_asset(
+            StockAccount("acct")
+        )
+
+        self.assertIsNone(asset.cash_in)
+        self.assertIsNone(asset.m_dCashIn)
+
+
 if __name__ == "__main__":
     unittest.main()
