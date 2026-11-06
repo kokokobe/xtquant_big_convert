@@ -300,7 +300,8 @@ class AssetSnapshot:
     and None means "the terminal did not report it" — distinct from 0.0.
     """
 
-    def __init__(self, account_id, cash=None, total_asset=None, frozen_cash=None, market_value=None, fetch_balance=None):
+    def __init__(self, account_id, cash=None, total_asset=None, frozen_cash=None, market_value=None, fetch_balance=None,
+                 cash_in=None, deposit=None, withdraw=None):
         self.account_id = account_id
         self.cash = cash
         # Withdrawable funds; None means unreported, not zero or available cash.
@@ -308,6 +309,13 @@ class AssetSnapshot:
         self.total_asset = total_asset
         self.frozen_cash = frozen_cash
         self.market_value = market_value
+        # Cash-flow facts (出入金净值 / 入金 / 出金, ThinkTrader m_dCashIn family).
+        # None means the terminal did not report the field -- never coerce to 0:
+        # qplatform distinguishes "no transfer" from "unreported" (spec
+        # 2026-11-06-cash-in-out-today-pnl-design.md).
+        self.cash_in = cash_in
+        self.deposit = deposit
+        self.withdraw = withdraw
 
 
 class AccountSnapshot:
