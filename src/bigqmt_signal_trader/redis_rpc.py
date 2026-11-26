@@ -801,6 +801,19 @@ def _real_order_row(snapshot):
     }
 
 
+def _trade_trading_day(snapshot):
+    """成交交易日：优先 traded_at 的 8 位日期段，否则由 traded_time 本地日派生。"""
+    traded_at = str(snapshot.traded_at or "")
+    digits = traded_at[:8]
+    if len(digits) == 8 and digits.isdigit():
+        return "%s-%s-%s" % (digits[0:4], digits[4:6], digits[6:8])
+    traded_time = int(getattr(snapshot, "traded_time", 0) or 0)
+    if traded_time > 0:
+        tz = _dt.timezone(_dt.timedelta(hours=8))
+        return _dt.datetime.fromtimestamp(traded_time, tz).strftime("%Y-%m-%d")
+    return ""
+
+
 def _real_deal_row(snapshot):
     return {
         "trade_id": str(snapshot.trade_id or ""),
@@ -811,6 +824,9 @@ def _real_deal_row(snapshot):
         "volume": _int_or_zero(snapshot.volume),
         "price": float(snapshot.price or 0.0),
         "traded_at": str(snapshot.traded_at or ""),
+        # R4 真实对账要求显式交易日与费用；0.0 表示柜台未回报（R4 侧按未确认）。
+        "commission": float(getattr(snapshot, "commission", 0.0) or 0.0),
+        "trading_day": _trade_trading_day(snapshot),
     }
 
 

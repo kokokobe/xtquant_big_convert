@@ -8,6 +8,7 @@
 不依赖真 QMT：注入假 order_gateway（真实路径里它包 get_trade_detail_data）
 返回固定快照行，走 process_request 全链路断言应答形状。
 """
+import datetime
 import json
 import os
 import sys
@@ -122,7 +123,8 @@ ORDER_ROW_KEYS = {
 
 DEAL_ROW_KEYS = {
     "trade_id", "order_sys_id", "user_order_id", "stock_code",
-    "action", "volume", "price", "traded_at"}
+    "action", "volume", "price", "traded_at", "commission",
+    "trading_day"}
 
 
 class RealQueryOrdersTest(unittest.TestCase):
@@ -216,6 +218,23 @@ class RealQueryDealsTest(unittest.TestCase):
         self.assertIsInstance(row["price"], float)
         self.assertEqual(row["price"], 12.34)
         self.assertEqual(row["traded_at"], "20261013093001")
+        self.assertIsInstance(row["commission"], float)
+        self.assertEqual(row["commission"], 0.0)
+        self.assertEqual(row["trading_day"], "2026-10-13")
+
+    def test_deal_row_carries_commission_and_trading_day_from_epoch(self):
+        tz = datetime.timezone(datetime.timedelta(hours=8))
+        traded_time = int(datetime.datetime(2026, 10, 13, 9, 30,
+                                            tzinfo=tz).timestamp())
+        snap = TradeSnapshot(
+            trade_id="t2", order_sys_id="s2", stock_code="513300.SH",
+            action="BUY", volume=100, price=2.001, traded_at="",
+            user_order_id="coid", traded_time=traded_time,
+            commission=5.03)
+        from bigqmt_signal_trader.redis_rpc import _real_deal_row
+        row = _real_deal_row(snap)
+        self.assertEqual(row["commission"], 5.03)
+        self.assertEqual(row["trading_day"], "2026-10-13")
 
     def test_deals_with_no_trades_is_an_empty_list(self):
         gateway = FakeRealQueryGateway()
